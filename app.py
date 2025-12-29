@@ -1,6 +1,5 @@
 # app.py
 
-import textwrap
 from typing import Dict, Optional
 
 import streamlit as st
@@ -13,15 +12,6 @@ from synthetic import (
     percentile_band_label,
     short_percentile,
 )
-
-# Optional: plug your real engines in here
-try:
-    from engines import pricing_engine, whales_engine, dm_engine  # type: ignore
-except Exception:
-    pricing_engine = None
-    whales_engine = None
-    dm_engine = None
-
 
 # ---------- Page config & global styles ----------
 
@@ -139,7 +129,6 @@ def get_profile_id(profile: Dict) -> str:
     for key in ("handle", "username", "creator_id", "id"):
         if key in profile and profile[key]:
             return str(profile[key]).lower()
-    # fallback: hash-ish
     return str(hash(repr(sorted(profile.items()))))
 
 
@@ -170,14 +159,13 @@ def format_pct(v: Optional[float], decimals: int = 1) -> str:
 
 def simple_pricing_fallback(profile: Dict) -> Dict:
     """
-    Very simple fallback pricing if no pricing_engine is wired.
-    You can delete this once your engine is plugged in.
+    Fallback pricing logic that does NOT depend on any external engines.
     """
     views = float(profile.get("avg_views") or profile.get("avg_video_views") or 0)
     followers = float(profile.get("followers") or profile.get("follower_count") or 0)
     engagement_rate = float(profile.get("engagement_rate") or 0.05)
 
-    # Heuristic CPM from context
+    # Simple CPM heuristic from audience size
     if followers < 50_000:
         base_cpm = 18
     elif followers < 250_000:
@@ -187,11 +175,11 @@ def simple_pricing_fallback(profile: Dict) -> Dict:
     else:
         base_cpm = 45
 
-    base_cpm *= (1 + (engagement_rate - 0.04) * 4.0)  # reward higher ER a bit
+    # Nudge CPM based on engagement
+    base_cpm *= (1 + (engagement_rate - 0.04) * 4.0)
 
     if views <= 0:
-        # fallback to follower-based reach
-        views = followers * 0.20
+        views = followers * 0.20  # fallback: 20% of followers
 
     low_cpm = base_cpm * 0.8
     high_cpm = base_cpm * 1.35
@@ -208,7 +196,7 @@ def simple_pricing_fallback(profile: Dict) -> Dict:
         "low_cpm": float(low_cpm),
         "high_cpm": float(high_cpm),
         "currency": "USD",
-        "explanation": "Heuristic CPM based on audience size & engagement (fallback).",
+        "explanation": "Heuristic CPM based on audience size & engagement (fallback only).",
     }
 
 
@@ -221,45 +209,54 @@ def render_creator_lookup() -> Optional[Dict]:
           <div class="pill">Step 1 · Load a Creator</div>
           <h2 style="margin-top:0.75rem;margin-bottom:0.35rem;">Creator profile input</h2>
           <p style="font-size:0.86rem;color:#9ca3af;">
-            Paste a handle or manually enter their core stats. Once loaded, the lab will generate a synthetic peer set
-            and unlock pricing, whales, and DM angles.
+            Paste a handle and enter core stats. Once loaded, the lab will generate a synthetic peer set
+            and unlock pricing, whales, and DM angles tuned to this creator.
           </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    col_handle, col_platform = st.columns([2, 1])
-    with col_handle:
-        handle = st.text_input("Creator handle or @username", placeholder="@creator")
-    with col_platform:
-        platform = st.selectbox(
-            "Platform",
-            ["Instagram", "TikTok", "YouTube", "OnlyFans", "Other"],
-            index=0,
-        )
+    with st.form("creator_lookup_form", clear_on_submit=False):
+        col_handle, col_platform = st.columns([2, 1])
+        with col_handle:
+            handle = st.text_input("Creator handle or @username", placeholder="@creator")
+        with col_platform:
+            platform = st.selectbox(
+                "Platform",
+                ["Instagram", "TikTok", "YouTube", "OnlyFans", "Other"],
+                index=0,
+            )
 
-    st.markdown("##### Key stats")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        followers = st.number_input("Followers", min_value=0, step=1000)
-    with c2:
-        avg_views = st.number_input("Avg views / story", min_value=0, step=1000)
-    with c3:
-        engagement_rate = st.number_input("Engagement rate (%)", min_value=0.0, max_value=100.0, step=0.1)
-    with c4:
-        avg_cpm = st.number_input("Known CPM (optional)", min_value=0.0, step=1.0)
+        st.markdown("##### Key stats")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            followers = st.number_input("Followers", min_value=0, step=1000)
+        with c2:
+            avg_views = st.number_input("Avg views / story", min_value=0, step=1000)
+        with c3:
+            engagement_rate = st.number_input(
+                "Engagement rate (%)",
+                min_value=0.0,
+                max_value=100.0,
+                step=0.1,
+            )
+        with c4:
+            avg_cpm = st.number_input("Known CPM (optional)", min_value=0.0, step=1.0)
 
-    col_btn, col_hint = st.columns([1, 3])
-    with col_btn:
-        load_clicked = st.button("Load creator →", type="primary", use_container_width=True)
-    with col_hint:
-        st.write(
-            "<span style='font-size:0.8rem;color:#6b7280;'>"
-            "If you have only approximate stats, that's fine – the synthetic test will fuzz around them."
-            "</span>",
-            unsafe_allow_html=True,
-        )
+        col_btn, col_hint = st.columns([1, 3])
+        with col_btn:
+            load_clicked = st.form_submit_button(
+                "Load creator →",
+                use_container_width=True,
+            )
+        with col_hint:
+            st.write(
+                "<span style='font-size:0.8rem;color:#6b7280;'>"
+                "Rough estimates are fine – the synthetic test will fuzz around them."
+                "</span>",
+                unsafe_allow_html=True,
+            )
 
     if not load_clicked:
         return None
@@ -277,9 +274,11 @@ def render_creator_lookup() -> Optional[Dict]:
         "avg_cpm": float(avg_cpm) if avg_cpm else None,
     }
 
-    # Persist to session
+    # Persist to session so subsequent reruns keep everything "lit up"
     st.session_state["creator_profile"] = profile
     st.session_state["profile_id"] = get_profile_id(profile)
+
+    st.success("Creator loaded. Scroll down to see pricing & labs update.")
 
     return profile
 
@@ -350,7 +349,7 @@ def render_profile_header(profile: Dict, profile_percentiles: Dict):
 
 # ---------- Smart Price Lab ----------
 
-def render_smart_price_tab(profile: Dict, cohort_df: pd.DataFrame):
+def render_smart_price_tab(profile: Optional[Dict], cohort_df: Optional[pd.DataFrame]):
     st.markdown(
         """
         <div class="pill" style="margin-bottom:0.4rem;">Lab 1 · Smart Price</div>
@@ -361,6 +360,10 @@ def render_smart_price_tab(profile: Dict, cohort_df: pd.DataFrame):
         """,
         unsafe_allow_html=True,
     )
+
+    if not profile or cohort_df is None or cohort_df.empty:
+        st.info("Load a creator above to generate a synthetic peer set and pricing band.")
+        return
 
     # Offer type / context
     c1, c2, c3 = st.columns([1.6, 1, 1])
@@ -385,31 +388,16 @@ def render_smart_price_tab(profile: Dict, cohort_df: pd.DataFrame):
 
     st.divider()
 
-    # Run pricing
-    if pricing_engine:
-        with st.spinner("Running pricing engine..."):
-            pricing_result = pricing_engine.run(  # type: ignore[attr-defined]
-                profile=profile,
-                offer_type=offer_type,
-                usage=usage,
-                urgency=urgency,
-                synthetic_df=cohort_df,
-            )
-    else:
-        pricing_result = simple_pricing_fallback(profile)
+    # For now we ignore offer_type/usage/urgency in fallback, but you can wire that in later.
+    pricing_result = simple_pricing_fallback(profile)
 
     rec_price = pricing_result.get("recommended_price")
     low_price = pricing_result.get("low_price")
     high_price = pricing_result.get("high_price")
-    base_cpm = pricing_result.get("base_cpm")
     currency = pricing_result.get("currency", "USD")
 
     # Display-friendly strings
-    if rec_price is not None:
-        rec_display = f"{currency} {rec_price:,.0f}"
-    else:
-        rec_display = "—"
-
+    rec_display = f"{currency} {rec_price:,.0f}" if rec_price is not None else "—"
     if low_price is not None and high_price is not None:
         band_display = f"{currency} {low_price:,.0f} – {currency} {high_price:,.0f}"
     else:
@@ -481,9 +469,9 @@ def render_smart_price_tab(profile: Dict, cohort_df: pd.DataFrame):
         )
 
 
-# ---------- Whale Radar & DM Studio stubs ----------
+# ---------- Whale Radar & DM Studio ----------
 
-def render_whale_radar_tab(profile: Dict, cohort_df: pd.DataFrame):
+def render_whale_radar_tab(profile: Optional[Dict], cohort_df: Optional[pd.DataFrame]):
     st.markdown(
         """
         <div class="pill" style="margin-bottom:0.4rem;">Lab 2 · Whale Radar</div>
@@ -494,10 +482,17 @@ def render_whale_radar_tab(profile: Dict, cohort_df: pd.DataFrame):
         """,
         unsafe_allow_html=True,
     )
-    st.info("Wire your existing whale engine back into this tab; synthetic cohort is available as `cohort_df`.")
+
+    if not profile or cohort_df is None or cohort_df.empty:
+        st.info("Load a creator above to generate whale brand ideas for this audience shape.")
+        return
+
+    # Placeholder: plug your previous whales engine logic here.
+    st.write("• Example whale brand 1  \n• Example whale brand 2  \n• Example whale brand 3")
+    st.caption("Hook your real whale targeting logic into this tab; `profile` and `cohort_df` are available.")
 
 
-def render_dm_studio_tab(profile: Dict, cohort_df: pd.DataFrame):
+def render_dm_studio_tab(profile: Optional[Dict], cohort_df: Optional[pd.DataFrame]):
     st.markdown(
         """
         <div class="pill" style="margin-bottom:0.4rem;">Lab 3 · DM Studio</div>
@@ -508,7 +503,17 @@ def render_dm_studio_tab(profile: Dict, cohort_df: pd.DataFrame):
         """,
         unsafe_allow_html=True,
     )
-    st.info("Reuse your DM engine here; you can also pull in percentile bands from `build_profile_percentiles`.")
+
+    if not profile or cohort_df is None or cohort_df.empty:
+        st.info("Load a creator above to get leverage-aware DM lines.")
+        return
+
+    # Example of using percentiles to adjust tone – you can wire your DM engine here.
+    st.write(
+        "“Hey [Brand], creators at this size usually see CPMs in the [X] band – "
+        "we've consistently driven above-benchmark performance on similar deals.”"
+    )
+    st.caption("Replace this with your DM engine; `profile` and synthetic context are available.")
 
 
 # ---------- Layout: hero + tools ----------
@@ -573,24 +578,20 @@ def main():
     st.markdown("---")
 
     # Step 1: lookup
-    profile = st.session_state.get("creator_profile")
+    saved_profile = st.session_state.get("creator_profile")
     new_profile = render_creator_lookup()
-    if new_profile is not None:
-        profile = new_profile
+    profile = new_profile or saved_profile
 
-    if not profile:
-        st.info("Load a creator above to unlock the lab.")
-        return
+    # Synthetic cohort + profile percentiles if we have a profile
+    cohort_df: Optional[pd.DataFrame] = None
+    profile_pcts: Dict = {}
+    if profile:
+        cohort_df = get_synthetic_for_profile(profile)
+        profile_pcts = build_profile_percentiles(profile, cohort_df)
+        render_profile_header(profile, profile_pcts)
+        st.markdown("")
 
-    # Synthetic cohort + profile percentiles
-    cohort_df = get_synthetic_for_profile(profile)
-    profile_pcts = build_profile_percentiles(profile, cohort_df)
-
-    render_profile_header(profile, profile_pcts)
-
-    st.markdown("")
-
-    # Tabs – all wired to profile + synthetic
+    # Tabs: always visible (no more “tabs gone” feeling)
     tabs = st.tabs(["💸 Smart Price Lab", "🐋 Whale Radar", "✉️ DM Studio"])
 
     with tabs[0]:
