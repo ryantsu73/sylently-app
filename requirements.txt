@@ -1,4 +1,5 @@
 streamlit
-numpy
-pandas
 requests
+beautifulsoup4
+pandas
+numpy
