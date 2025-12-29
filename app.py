@@ -13,40 +13,138 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------
-# TRY TO IMPORT YOUR EXISTING FEATURE MODULES
-# (edit these imports to match your real file/function names)
+# TRY TO IMPORT YOUR ENGINE MODULES
+# ---------------------------------------------------
+pricing_engine = None
+whales = None
+dm_suggestions = None
+engine_import_error = None
+
+try:
+    from engine import pricing_engine as _pricing_engine
+    from engine import whales as _whales
+    from engine import dm_suggestions as _dm_suggestions
+
+    pricing_engine = _pricing_engine
+    whales = _whales
+    dm_suggestions = _dm_suggestions
+except Exception as e:
+    engine_import_error = e
+
+
+# ---------------------------------------------------
+# HELPERS: FIND A UI FUNCTION IN A MODULE
+# ---------------------------------------------------
+def _call_first_existing(module, candidates, tool_label: str):
+    """
+    Try calling the first function name in `candidates` that exists in `module`.
+    If none exist, show a helpful message.
+    """
+    if module is None:
+        st.error(
+            f"Could not import engine module for **{tool_label}**.\n\n"
+            f"Python error: `{engine_import_error}`"
+        )
+        with st.expander("How to fix this"):
+            st.markdown(
+                """
+                1. Make sure you have a folder called `engine` in the same directory as `app.py`.
+                2. Inside `engine`, you should have:
+                   - `__init__.py`
+                   - `pricing_engine.py`
+                   - `whales.py`
+                   - `dm_suggestions.py`
+                3. Commit + push to GitHub, then reload the app.
+                """
+            )
+        return
+
+    for name in candidates:
+        if hasattr(module, name):
+            fn = getattr(module, name)
+            if callable(fn):
+                fn()
+                return
+
+    # If we got here, the module imported but no expected function names exist
+    st.warning(
+        f"I could import `{module.__name__}`, but I couldn't find any of these "
+        f"functions: {', '.join(candidates)}."
+    )
+    with st.expander("How to fix this"):
+        st.markdown(
+            f"""
+            - Open `{module.__file__}` and either:
+              - Add one function with one of these names: `{', '.join(candidates)}`, and put your Streamlit UI in there, **or**
+              - Rename your existing main UI function to one of those names.
+            - Example inside `{module.__name__}.py`:
+
+              ```python
+              import streamlit as st
+
+              def render_ui():
+                  st.subheader("{tool_label} UI")
+                  # ... your existing inputs/outputs ...
+              ```
+            """
+        )
+
+
+# ---------------------------------------------------
+# WRAPPERS FOR EACH TOOL
 # ---------------------------------------------------
 def render_smart_price_test_ui():
-    """Wrap your existing Smart Price Test UI here."""
-    try:
-        # Example: if you have engine/pricing_engine.py with a render() function:
-        # from engine.smart_price_test import render_smart_price_test
-        # render_smart_price_test()
-        st.info("Smart Price Test UI goes here. Import and call your real function inside render_smart_price_test_ui().")
-    except Exception as e:
-        st.error(f"Could not load Smart Price Test module: {e}")
+    """
+    Call the main UI function in engine/pricing_engine.py.
+    Tries several common names so you don't have to change your file if you already built it.
+    """
+    _call_first_existing(
+        pricing_engine,
+        candidates=[
+            "render_smart_price_test_ui",
+            "render_smart_price_test",
+            "render_ui",
+            "main",
+            "app",
+        ],
+        tool_label="Smart Price Test",
+    )
 
 
 def render_whale_radar_ui():
-    """Wrap your existing Whale Radar UI here."""
-    try:
-        # Example:
-        # from whales import render_whale_radar
-        # render_whale_radar()
-        st.info("Whale Radar UI goes here. Import and call your real function inside render_whale_radar_ui().")
-    except Exception as e:
-        st.error(f"Could not load Whale Radar module: {e}")
+    """
+    Call the main UI function in engine/whales.py.
+    """
+    _call_first_existing(
+        whales,
+        candidates=[
+            "render_whale_radar_ui",
+            "render_whales_ui",
+            "render_whale_detector",
+            "render_ui",
+            "main",
+            "app",
+        ],
+        tool_label="Whale Radar",
+    )
 
 
 def render_dm_studio_ui():
-    """Wrap your existing DM Suggestions / DM Studio UI here."""
-    try:
-        # Example:
-        # from dm_suggestions import render_dm_studio
-        # render_dm_studio()
-        st.info("DM Studio UI goes here. Import and call your real function inside render_dm_studio_ui().")
-    except Exception as e:
-        st.error(f"Could not load DM Studio module: {e}")
+    """
+    Call the main UI function in engine/dm_suggestions.py.
+    """
+    _call_first_existing(
+        dm_suggestions,
+        candidates=[
+            "render_dm_studio_ui",
+            "render_dm_suggestions_ui",
+            "render_dm_ui",
+            "render_ui",
+            "main",
+            "app",
+        ],
+        tool_label="DM Studio",
+    )
 
 
 # ---------------------------------------------------
@@ -368,7 +466,7 @@ def render_hero():
 
 
 # ---------------------------------------------------
-# FEATURE CARDS
+# FEATURE CARDS OVERVIEW
 # ---------------------------------------------------
 def render_tools_overview():
     st.markdown(
@@ -437,7 +535,7 @@ def render_tools_overview():
 
 
 # ---------------------------------------------------
-# TABS THAT ACTUALLY RUN YOUR TOOLS
+# TABS THAT RUN YOUR TOOLS
 # ---------------------------------------------------
 def render_lab_tabs():
     st.markdown("### Open your lab")
