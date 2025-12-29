@@ -1,178 +1,190 @@
-from __future__ import annotations
+# synthetic.py
 
-from dataclasses import dataclass
-from typing import Dict, List, Any
+import math
 import random
+from typing import Dict, Optional
+
+import numpy as np
+import pandas as pd
 
 
-@dataclass
-class SyntheticPoint:
-    impressions: int
-    clicks: int
-    subs: int
-    revenue: float
+def _safe_get(profile: Dict, *keys, default=None):
+    for k in keys:
+        if k in profile and profile[k] is not None:
+            return profile[k]
+    return default
 
 
-def _smooth_random(base: float, variation: float) -> float:
+def generate_synthetic_cohort(
+    profile: Dict,
+    n: int = 300,
+    random_state: int = 42
+) -> pd.DataFrame:
     """
-    Adds a small, bounded random variation around a base value.
-    variation is a fraction (e.g. 0.3 means ±30%).
+    Generate a synthetic cohort of similar creators around the given profile.
+
+    Columns:
+      - followers
+      - avg_views
+      - engagement_rate
+      - cpm
+      - suggested_price
     """
-    return max(0.0, base * (1 + random.uniform(-variation, variation)))
+    rng = np.random.default_rng(random_state)
+
+    # Base metrics from profile with robust fallbacks
+    followers = float(_safe_get(profile, "followers", "follower_count", default=100_000))
+    avg_views = float(
+        _safe_get(profile, "avg_views", "avg_video_views", "story_views", default=followers * 0.15)
+    )
+    engagement_rate = float(_safe_get(profile, "engagement_rate", default=0.05))
+    base_cpm = float(_safe_get(profile, "avg_cpm", "cpm", default=25.0))
+
+    # Clamp to avoid degenerate values
+    followers = max(followers, 1_000)
+    avg_views = max(avg_views, 1_000)
+    engagement_rate = max(min(engagement_rate, 0.25), 0.005)
+    base_cpm = max(base_cpm, 5.0)
+
+    # Use log-normal-ish spreads around the profile
+    followers_scale = 0.5  # 50% spread
+    views_scale = 0.5
+    cpm_scale = 0.35
+    er_scale = 0.35
+
+    followers_samples = np.clip(
+        rng.lognormal(mean=math.log(followers), sigma=followers_scale, size=n),
+        1_000,
+        followers * 20
+    )
+    views_samples = np.clip(
+        rng.lognormal(mean=math.log(avg_views), sigma=views_scale, size=n),
+        1_000,
+        followers_samples * 0.8
+    )
+    er_samples = np.clip(
+        rng.normal(loc=engagement_rate, scale=engagement_rate * er_scale, size=n),
+        0.003,
+        0.35
+    )
+    cpm_samples = np.clip(
+        rng.normal(loc=base_cpm, scale=base_cpm * cpm_scale, size=n),
+        5.0,
+        250.0
+    )
+
+    suggested_price = (views_samples / 1000.0) * cpm_samples
+
+    df = pd.DataFrame(
+        {
+            "followers": followers_samples.astype(int),
+            "avg_views": views_samples.astype(int),
+            "engagement_rate": er_samples,
+            "cpm": cpm_samples,
+            "suggested_price": suggested_price,
+        }
+    )
+
+    return df
 
 
-def generate_synthetic_data_from_profile(
-    profile: Dict[str, Any],
-    days: int = 7,
-) -> Dict[str, Any]:
+def percentile_rank(values: pd.Series, value: Optional[float]) -> Optional[float]:
     """
-    Generate synthetic, realistic metrics from basic OnlyFans profile stats.
-
-    Expected profile keys (you can adapt names to your real fields):
-      - followers: int
-      - posts_count: int
-      - price: float (monthly subscription price, if you have it)
-      - avg_likes: float (optional)
-      - avg_comments: float (optional)
-
-    Returns a dict of shape:
-      {
-        "daily": [ {impressions, clicks, subs, revenue}, ... ],
-        "summary": {...},
-        "source": "synthetic_from_profile"
-      }
+    Simple percentile rank implementation: percentage of values <= value.
+    Returns 0–100 or None if invalid.
     """
+    if value is None:
+        return None
+    try:
+        arr = np.asarray(values, dtype=float)
+    except Exception:
+        return None
+    if arr.size == 0:
+        return None
+    return float(np.mean(arr <= float(value)) * 100.0)
 
-    followers = profile.get("followers") or 0
-    posts_count = profile.get("posts_count") or 0
-    price = float(profile.get("price") or 9.99)  # default if unknown
 
-    # Follower & posting scale
-    followers = max(0, int(followers))
-    posts_count = max(0, int(posts_count))
+def build_profile_percentiles(
+    profile: Dict,
+    cohort_df: pd.DataFrame
+) -> Dict[str, Optional[float]]:
+    """
+    Percentiles for the *profile* vs synthetic peers:
+      - followers_pct
+      - views_pct
+      - engagement_pct
+    """
+    if cohort_df is None or cohort_df.empty:
+        return {
+            "followers_pct": None,
+            "views_pct": None,
+            "engagement_pct": None,
+        }
 
-    # Assume a rough daily reach as a fraction of followers.
-    # Smaller creators typically reach a higher % of their base.
-    if followers <= 1_000:
-        reach_ratio = 0.5   # 50% of followers
-    elif followers <= 10_000:
-        reach_ratio = 0.25  # 25%
-    elif followers <= 100_000:
-        reach_ratio = 0.12  # 12%
-    else:
-        reach_ratio = 0.05  # 5%
+    followers = _safe_get(profile, "followers", "follower_count")
+    avg_views = _safe_get(profile, "avg_views", "avg_video_views", "story_views")
+    engagement_rate = _safe_get(profile, "engagement_rate")
 
-    # Baseline CTR and conversion, then we add noise per day
-    base_ctr = 0.08          # 8% click-through rate
-    base_conversion = 0.025  # 2.5% of clicks convert to subs
-
-    # Slightly nudge based on posting frequency:
-    # More posts → a bit more impressions, but slightly lower per-post CTR.
-    posting_factor = 1.0
-    if posts_count > 200:
-        posting_factor = 1.2
-        base_ctr *= 0.95
-    elif posts_count < 20:
-        posting_factor = 0.8
-        base_ctr *= 1.05
-
-    daily_points: List[SyntheticPoint] = []
-
-    for _ in range(days):
-        # Daily impressions
-        base_impressions = int(followers * reach_ratio * posting_factor)
-        impressions = int(_smooth_random(base_impressions, 0.3))
-
-        # Clicks from impressions
-        ctr = _smooth_random(base_ctr, 0.25)
-        clicks = int(impressions * ctr)
-
-        # Subs from clicks
-        conv = _smooth_random(base_conversion, 0.3)
-        subs = int(clicks * conv)
-
-        # Revenue from subs
-        revenue = subs * price
-
-        daily_points.append(
-            SyntheticPoint(
-                impressions=impressions,
-                clicks=clicks,
-                subs=subs,
-                revenue=revenue,
-            )
+    return {
+        "followers_pct": percentile_rank(cohort_df["followers"], followers) if followers else None,
+        "views_pct": percentile_rank(cohort_df["avg_views"], avg_views) if avg_views else None,
+        "engagement_pct": percentile_rank(
+            cohort_df["engagement_rate"], engagement_rate
         )
-
-    # Aggregate summary
-    total_impressions = sum(p.impressions for p in daily_points)
-    total_clicks = sum(p.clicks for p in daily_points)
-    total_subs = sum(p.subs for p in daily_points)
-    total_revenue = sum(p.revenue for p in daily_points)
-
-    avg_impressions = total_impressions / days if days else 0
-    avg_clicks = total_clicks / days if days else 0
-    avg_subs = total_subs / days if days else 0
-    avg_revenue = total_revenue / days if days else 0
-
-    summary = {
-        "total_impressions": total_impressions,
-        "total_clicks": total_clicks,
-        "total_subs": total_subs,
-        "total_revenue": round(total_revenue, 2),
-        "avg_impressions": round(avg_impressions, 1),
-        "avg_clicks": round(avg_clicks, 1),
-        "avg_subs": round(avg_subs, 1),
-        "avg_revenue": round(avg_revenue, 2),
-        "cvr": round(total_subs / total_clicks, 4) if total_clicks else 0.0,
-        "ctr": round(total_clicks / total_impressions, 4) if total_impressions else 0.0,
-        "rpm": round(total_revenue * 1000 / total_impressions, 2) if total_impressions else 0.0,
-    }
-
-    return {
-        "daily": [p.__dict__ for p in daily_points],
-        "summary": summary,
-        "source": "synthetic_from_profile",
+        if engagement_rate
+        else None,
     }
 
 
-def _map_to_percentile(value: float, low: float, high: float) -> float:
+def build_pricing_percentiles(
+    profile: Dict,
+    cohort_df: pd.DataFrame,
+    recommended_price: Optional[float],
+) -> Dict[str, Optional[float]]:
     """
-    Maps value from [low, high] → [0.05, 0.95].
-    Below low → 0.05, above high → 0.95.
+    Percentiles for the *recommended price* vs synthetic peers:
+      - price_pct (absolute price vs synthetic suggested_price)
+      - cpm_pct   (effective CPM vs synthetic cpm)
     """
-    if value <= low:
-        return 0.05
-    if value >= high:
-        return 0.95
-    ratio = (value - low) / (high - low)
-    return 0.05 + ratio * (0.95 - 0.05)
+    if cohort_df is None or cohort_df.empty:
+        return {"price_pct": None, "cpm_pct": None}
+
+    if recommended_price is None:
+        return {"price_pct": None, "cpm_pct": None}
+
+    # Effective CPM for the recommended price based on profile views
+    views = float(
+        _safe_get(profile, "avg_views", "avg_video_views", "story_views", default=0) or 0
+    )
+    if views <= 0:
+        effective_cpm = None
+    else:
+        effective_cpm = float(recommended_price) / (views / 1000.0)
+
+    price_pct = percentile_rank(cohort_df["suggested_price"], recommended_price)
+    cpm_pct = percentile_rank(cohort_df["cpm"], effective_cpm) if effective_cpm else None
+
+    return {"price_pct": price_pct, "cpm_pct": cpm_pct}
 
 
-def compute_percentiles_from_synthetic(synth: Dict[str, Any]) -> Dict[str, Any]:
+def percentile_band_label(p: Optional[float]) -> str:
     """
-    Convert synthetic summary metrics to percentile scores.
-    Tune the [low, high] thresholds to your expectations.
+    Turns a percentile into a human-readable band label.
     """
+    if p is None:
+        return "n/a"
+    if p < 20:
+        return f"{p:.0f}th • Underpriced vs peers"
+    if p < 40:
+        return f"{p:.0f}th • Slightly low vs peers"
+    if p <= 60:
+        return f"{p:.0f}th • In line with peers"
+    if p <= 80:
+        return f"{p:.0f}th • Strong (top 20%)"
+    return f"{p:.0f}th • Very strong (top 10%)"
 
-    summary = synth.get("summary", {})
 
-    rpm = summary.get("rpm", 0.0)                      # revenue per 1000 impressions
-    ctr = summary.get("ctr", 0.0)                      # click-through rate
-    avg_impressions = summary.get("avg_impressions", 0)
-    # If you want, you can also incorporate cvr:
-    # cvr = summary.get("cvr", 0.0)
-
-    views_percentile = _map_to_percentile(avg_impressions, 100.0, 50_000.0)
-    earnings_percentile = _map_to_percentile(rpm, 1.0, 80.0)
-    engagement_percentile = _map_to_percentile(ctr, 0.01, 0.15)
-
-    return {
-        "views_percentile": round(views_percentile, 2),
-        "earnings_percentile": round(earnings_percentile, 2),
-        "engagement_percentile": round(engagement_percentile, 2),
-        "source": "synthetic_profile_model",
-        "explanation": (
-            "Percentiles estimated from synthetic metrics generated from the "
-            "creator's OnlyFans profile stats. Real test data will override these."
-        ),
-    }
+def short_percentile(p: Optional[float]) -> str:
+    if p is None:
+        return "—"
+    return f"{p:.0f}th"
