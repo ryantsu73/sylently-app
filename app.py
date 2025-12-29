@@ -1,6 +1,5 @@
 import re
-import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 import numpy as np
 import pandas as pd
@@ -64,21 +63,27 @@ def fetch_onlyfans_profile(handle: str) -> Dict[str, Any]:
     """
     username = handle.strip().lstrip("@").strip("/")
     if not username:
+        followers = 5_000
+        avg_views = int(followers * 0.3)
+        engagement_rate = 3.5
+        avg_cpm = 20.0
+        estimated_subscribers = followers
+        estimated_monthly_visits = followers * 15
         return {
             "platform": "OnlyFans",
             "handle": handle,
             "profile_name": handle or "Unknown",
             "profile_image_url": None,
-            "followers": 5_000,
+            "followers": followers,
             "likes": None,
             "posts_count": None,
             "photos_count": None,
             "videos_count": None,
-            "avg_views": int(5_000 * 0.3),
-            "engagement_rate": 3.5,
-            "avg_cpm": 20.0,
-            "estimated_subscribers": 5_000,
-            "estimated_monthly_visits": 5_000 * 15,
+            "avg_views": avg_views,
+            "engagement_rate": engagement_rate,
+            "avg_cpm": avg_cpm,
+            "estimated_subscribers": estimated_subscribers,
+            "estimated_monthly_visits": estimated_monthly_visits,
             "raw_source": "onlyfans_invalid_handle_fallback",
             "error": "Handle was empty after cleaning.",
         }
@@ -259,12 +264,6 @@ def fetch_onlyfans_profile(handle: str) -> Dict[str, Any]:
 def fetch_creator_profile_from_web(handle: str, platform: str) -> Dict[str, Any]:
     """
     Dispatcher for web lookups by platform.
-
-    Returns a dict with at least:
-      - followers
-      - avg_views
-      - engagement_rate
-      - avg_cpm
     """
     platform_norm = platform.strip().lower()
 
@@ -334,6 +333,204 @@ def percentile_rank(series: pd.Series, value: float) -> float:
     if len(series) == 0:
         return 0.0
     return round(100.0 * (series < value).mean(), 2)
+
+
+# -----------------------------
+# Revenue & strategy modules
+# -----------------------------
+
+def generate_dm_reachout_suggestions(
+    profile: Dict[str, Any],
+    followers: int,
+    estimated_subscribers: int,
+    engagement_rate: float,
+) -> List[Dict[str, str]]:
+    """
+    Returns top-3 DM outreach suggestions (segments + example messages).
+    This is intentionally high-level and text-only so you can swap in your
+    own DM sending logic from your repo.
+    """
+    name = profile.get("profile_name") or profile.get("handle") or "you"
+    handle = profile.get("handle", "")
+
+    # Basic segmentation assumptions
+    subs = max(estimated_subscribers or followers, 1)
+    eng = max(engagement_rate, 0.1)
+
+    suggestions = []
+
+    # 1) New / silent fans
+    suggestions.append(
+        {
+            "segment": "New & silent fans (recent followers with low interaction)",
+            "goal": "Convert silent followers into paying subs or PPV buyers.",
+            "message": (
+                f"Hey love, thanks for following {name}! 💕 "
+                "I noticed you haven't seen my latest sets yet – "
+                "I'm sending you an exclusive preview today. "
+                "If you enjoy it, I have a full pack waiting just for you."
+            ),
+            "cta": "Link to a discounted intro bundle or trial subscription.",
+            "timing": "Send within 24–72 hours after they follow or like for the first time.",
+        }
+    )
+
+    # 2) Active engagers (high ER)
+    suggestions.append(
+        {
+            "segment": "Highly engaged fans (frequent likes/messages)",
+            "goal": "Upsell to higher-value bundles and customs.",
+            "message": (
+                f"You've been showing me so much love lately, thank you 🥰 "
+                "I put together a VIP bundle just for my top supporters – "
+                "full-length videos + behind-the-scenes, and a custom voice note from me."
+            ),
+            "cta": "High-value bundle / VIP tier DM with limited slots.",
+            "timing": "Target top ~5–10% of engagers weekly.",
+        }
+    )
+
+    # 3) Lapsed subs
+    suggestions.append(
+        {
+            "segment": "Lapsed or at-risk subs (haven't opened content recently)",
+            "goal": "Re-activate churn-risk subscribers with a time-limited offer.",
+            "message": (
+                "I haven't seen you around in a bit and I miss you 🥺 "
+                "I'm doing a 48-hour comeback offer: custom photo + full access to "
+                "my latest drop if you stay subscribed this month."
+            ),
+            "cta": "Retention incentive: custom piece or bundle if they keep/renew sub.",
+            "timing": "Trigger 3–7 days before renewal or after 10–14 days of inactivity.",
+        }
+    )
+
+    return suggestions
+
+
+def generate_whale_upsell_ideas(
+    profile: Dict[str, Any],
+    estimated_subscribers: int,
+    avg_cpm: float,
+) -> List[Dict[str, str]]:
+    """
+    Returns strategy ideas aimed at 'whales' – your top spenders.
+    Does not depend on private fan data; meant to be content/offer ideas.
+    """
+    name = profile.get("profile_name") or profile.get("handle") or "you"
+    subs = max(estimated_subscribers or 1, 1)
+    cpm = max(avg_cpm, 1.0)
+
+    ideas = []
+
+    ideas.append(
+        {
+            "name": "Monthly VIP whale club",
+            "who": "Top 1–3% of spenders / most engaged fans.",
+            "offer": (
+                "Limited VIP list with priority DMs, 1 custom request per month, "
+                "early access to new sets, and their name on a private thank-you list."
+            ),
+            "pricing": (
+                "Price at 3–5x your base subscription. "
+                "If your sub is $10, test $30–$50/month for VIP."
+            ),
+            "notes": "Cap the number of VIP spots to keep it exclusive and manageable.",
+        }
+    )
+
+    ideas.append(
+        {
+            "name": "High-ticket custom bundles",
+            "who": "Fans who already buy multiple PPVs or tip heavily.",
+            "offer": (
+                "Personalized photo/video bundles (e.g., 10–20 photos + 3–5 short videos) "
+                "selected to their preferences, delivered over a week."
+            ),
+            "pricing": (
+                "Bundle price in the $99–$249 range depending on your brand and demand. "
+                "Anchor the value by comparing to individual PPV prices."
+            ),
+            "notes": "Audit past buyers and DM only those who already spent above a threshold.",
+        }
+    )
+
+    ideas.append(
+        {
+            "name": "Whale live session / group show",
+            "who": "Very small group of highest tippers.",
+            "offer": (
+                "Exclusive live session (group or 1:1), with recording access included, "
+                "plus behind-the-scenes content."
+            ),
+            "pricing": (
+                "Group: $50–$150 per seat with limited spots. "
+                "1:1: $150–$500 depending on length and boundaries."
+            ),
+            "notes": "Use manual vetting: invite only fans you’re comfortable with.",
+        }
+    )
+
+    return ideas
+
+
+def run_pricing_engine(
+    followers: int,
+    estimated_subscribers: int,
+    avg_views: float,
+    engagement_rate: float,
+    avg_cpm: float,
+    current_price: float,
+) -> Dict[str, Any]:
+    """
+    Simple pricing engine:
+      - suggests subscription price
+      - suggests PPV range
+      - estimates ARPU and potential uplift vs current.
+    """
+    followers = max(followers, 1)
+    subs = max(estimated_subscribers or followers, 1)
+    views = max(avg_views, 1.0)
+    eng = max(engagement_rate, 0.1)
+    cpm = max(avg_cpm, 0.5)
+
+    # Approx revenue-per-fan implied by CPM (very rough)
+    monthly_impressions = views * 30  # 30 posts or story-equivalents
+    implied_revenue_per_fan = (monthly_impressions / 1000.0 * cpm) / followers
+
+    # We assume 15–35% of followers are/will be subs
+    target_sub_penetration = np.clip(eng / 10.0, 0.15, 0.35)
+    if target_sub_penetration <= 0:
+        target_sub_penetration = 0.2
+
+    # Target ARPU from subs (scale CPM signal)
+    target_arpu = implied_revenue_per_fan * 4  # convert soft ad-value to direct pay
+    target_arpu = np.clip(target_arpu, 3.0, 30.0)
+
+    # Suggested subscription price: ARPU / penetration
+    suggested_sub_price = target_arpu / target_sub_penetration
+    # Clamp to reasonable OF range
+    suggested_sub_price = float(np.clip(suggested_sub_price, 5.0, 50.0))
+    suggested_sub_price = round(suggested_sub_price * 2) / 2.0  # .0 or .5
+
+    # PPV pricing suggestions: fractions of sub price
+    ppv_low = round(max(4.0, suggested_sub_price * 0.6), 2)
+    ppv_high = round(max(ppv_low + 2.0, suggested_sub_price * 2.0), 2)
+
+    # Basic uplift estimate
+    current_price = max(current_price, 1.0)
+    uplift_ratio = (suggested_sub_price / current_price) if current_price else 1.0
+    uplift_pct = round((uplift_ratio - 1.0) * 100.0, 2)
+
+    return {
+        "suggested_sub_price": suggested_sub_price,
+        "ppv_low": ppv_low,
+        "ppv_high": ppv_high,
+        "implied_revenue_per_fan": round(implied_revenue_per_fan, 2),
+        "target_sub_penetration": round(target_sub_penetration * 100.0, 1),
+        "target_arpu": round(target_arpu, 2),
+        "uplift_pct_vs_current": uplift_pct,
+    }
 
 
 # -----------------------------
@@ -516,6 +713,98 @@ with col_main:
     else:
         st.info("Generate the synthetic cohort from the sidebar to see benchmarks here.")
 
+    # -------------------------
+    # Revenue strategy & outreach
+    # -------------------------
+    st.markdown("---")
+    st.subheader("Revenue strategy & outreach")
+
+    active_profile = st.session_state.web_profile or {
+        "platform": platform,
+        "handle": handle or "unknown",
+        "profile_name": handle or "Creator",
+    }
+    est_subs_for_engine = active_profile.get("estimated_subscribers", followers_input)
+
+    dm_suggestions = generate_dm_reachout_suggestions(
+        profile=active_profile,
+        followers=followers_input,
+        estimated_subscribers=est_subs_for_engine,
+        engagement_rate=engagement_input,
+    )
+
+    whale_ideas = generate_whale_upsell_ideas(
+        profile=active_profile,
+        estimated_subscribers=est_subs_for_engine,
+        avg_cpm=cpm_input,
+    )
+
+    dm_tab, whale_tab, pricing_tab = st.tabs(
+        ["DM outreach (top 3)", "Whale offers", "Pricing engine"]
+    )
+
+    with dm_tab:
+        st.markdown("Use these as **DM templates / playbooks**. Plug them into your own DM sender.")
+        for i, s in enumerate(dm_suggestions, start=1):
+            st.markdown(f"#### #{i} – {s['segment']}")
+            st.markdown(f"**Goal:** {s['goal']}")
+            st.markdown(f"**Message idea:** {s['message']}")
+            st.markdown(f"**CTA:** {s['cta']}")
+            st.markdown(f"**Timing:** {s['timing']}")
+            st.markdown("---")
+
+    with whale_tab:
+        st.markdown("Ideas focused on **high-value 'whale' fans**.")
+        for idea in whale_ideas:
+            st.markdown(f"#### {idea['name']}")
+            st.markdown(f"**Who:** {idea['who']}")
+            st.markdown(f"**Offer:** {idea['offer']}")
+            st.markdown(f"**Pricing guidance:** {idea['pricing']}")
+            st.markdown(f"**Notes:** {idea['notes']}")
+            st.markdown("---")
+
+    with pricing_tab:
+        st.markdown("Pricing suggestions are **heuristics**, not financial advice.")
+        current_sub_price = st.number_input(
+            "Current monthly subscription price (USD)",
+            min_value=1.0,
+            max_value=200.0,
+            value=12.0,
+            step=0.5,
+            key="current_sub_price_input",
+        )
+
+        pe = run_pricing_engine(
+            followers=int(followers_input),
+            estimated_subscribers=int(est_subs_for_engine or followers_input),
+            avg_views=float(avg_views_input),
+            engagement_rate=float(engagement_input),
+            avg_cpm=float(cpm_input),
+            current_price=float(current_sub_price),
+        )
+
+        st.markdown("### Recommended pricing")
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            st.metric("Suggested sub price", f"${pe['suggested_sub_price']:.2f}")
+        with col_b:
+            st.metric("PPV range (low–high)", f"${pe['ppv_low']:.2f} – ${pe['ppv_high']:.2f}")
+        with col_c:
+            uplift_str = f"{pe['uplift_pct_vs_current']:+.1f}%"
+            st.metric("Potential revenue uplift vs current", uplift_str)
+
+        st.markdown("### Model assumptions")
+        st.write(
+            f"- Implied revenue per fan (from CPM): **${pe['implied_revenue_per_fan']:.2f}** / month\n"
+            f"- Target sub penetration: **{pe['target_sub_penetration']:.1f}%** of followers\n"
+            f"- Target ARPU from subs: **${pe['target_arpu']:.2f}** / month"
+        )
+        st.caption(
+            "You can override any of these numbers in your own pricing engine module; "
+            "this block is just a default implementation."
+        )
+
+
 with col_side:
     st.subheader("Earnings back-of-the-envelope")
 
@@ -553,5 +842,7 @@ st.markdown("---")
 st.caption(
     "Note: OnlyFans scraping is based on public meta information and may break "
     "if the site changes its structure. Always respect the platform's terms of service. "
-    "Subscriber and visit metrics shown here are estimates derived from public data."
+    "Subscriber and visit metrics shown here are estimates derived from public data. "
+    "DM outreach, whale offers, and pricing suggestions are heuristics you can replace "
+    "with your own modules from the repo."
 )
