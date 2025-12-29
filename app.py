@@ -1,5 +1,10 @@
 import streamlit as st
 
+from synthetic import (
+    generate_synthetic_data_from_profile,
+    compute_percentiles_from_synthetic,
+)
+
 # -----------------------------
 # Page config
 # -----------------------------
@@ -25,6 +30,10 @@ def init_state():
 
     if "test_results" not in st.session_state:
         st.session_state["test_results"] = None  # whatever structure you like
+
+    # NEW: synthetic data generated from OnlyFans profile
+    if "synthetic_data" not in st.session_state:
+        st.session_state["synthetic_data"] = None  # dict with synthetic metrics
 
 
 init_state()
@@ -64,6 +73,8 @@ def lookup_onlyfans_profile(profile_url_or_username: str) -> dict:
         "avg_comments": 4,
         "bio": "This is an example bio. Replace with real scraped data.",
         "niche": "General",
+        # Optional: if you scrape subscription price, wire it here:
+        "price": 9.99,
         "source": "live_page",  # mark that this came from a live lookup
     }
     return fake_profile
@@ -107,7 +118,7 @@ def compute_percentiles_from_test_results(test_results: dict) -> dict:
         "earnings_percentile": 0.62,     # 62nd percentile
         "engagement_percentile": 0.80,   # 80th percentile
         "source": "small_test",
-        "explanation": "Dummy percentile values for demonstration.",
+        "explanation": "Dummy percentile values derived from small test results.",
     }
     return percentiles
     # --- END: example stub ---
@@ -115,33 +126,21 @@ def compute_percentiles_from_test_results(test_results: dict) -> dict:
 
 def compute_percentiles_from_live_profile(profile: dict) -> dict:
     """
-    FALLBACK: compute rough/approximate percentiles directly from live profile data
-    when no small test data exists.
+    FALLBACK: compute percentile metrics by first creating realistic synthetic
+    performance data from the live OnlyFans profile stats, then mapping those
+    synthetic metrics to percentile scores.
 
-    This is where you map live stats (followers, engagement, etc.) to percentile scores.
+    This is now the *dynamic synthetic* path you asked for.
     """
 
-    # --- BEGIN: example stub (safe to replace with your real code) ---
-    followers = profile.get("followers") or 0
-    posts = profile.get("posts_count") or 0
+    # Generate synthetic data from the profile (7-day sample by default)
+    synth = generate_synthetic_data_from_profile(profile)
+    st.session_state["synthetic_data"] = synth
 
-    # Very rough / fake logic just to show structure:
-    views_percentile = min(0.99, max(0.01, followers / 10000.0))
-    earnings_percentile = min(0.99, max(0.01, (followers * 0.5 + posts * 2) / 20000.0))
-    engagement_percentile = 0.5  # constant in this stub
+    # Map synthetic summary to percentile scores
+    percentiles = compute_percentiles_from_synthetic(synth)
 
-    percentiles = {
-        "views_percentile": round(views_percentile, 2),
-        "earnings_percentile": round(earnings_percentile, 2),
-        "engagement_percentile": round(engagement_percentile, 2),
-        "source": "live_profile_fallback",
-        "explanation": (
-            "Approximate percentiles computed from live profile data only. "
-            "Replace this with your real model."
-        ),
-    }
     return percentiles
-    # --- END: example stub ---
 
 
 # -----------------------------
@@ -216,12 +215,17 @@ def show_profile_lookup_step():
                 st.error("Could not fetch profile data. Please check the URL/username.")
                 st.session_state["creator_profile"] = None
                 st.session_state["profile_loaded"] = False
+                st.session_state["percentile_data"] = None
+                st.session_state["test_results"] = None
+                st.session_state["synthetic_data"] = None
             else:
                 st.session_state["creator_profile"] = profile
                 st.session_state["profile_loaded"] = True
+
                 # Reset downstream data when a new profile is loaded
                 st.session_state["percentile_data"] = None
                 st.session_state["test_results"] = None
+                st.session_state["synthetic_data"] = None
 
                 username = profile.get("username", profile_input.strip())
                 st.success(f"Profile loaded for @{username}")
@@ -271,7 +275,8 @@ def show_overview_tab():
     st.markdown("---")
     st.markdown(
         "_This overview is powered by the live OnlyFans profile data. "
-        "Run a small test in the next tab for deeper percentile-based insights._"
+        "Run a small test in the next tab for deeper percentile-based insights, "
+        "or use synthetic estimates from the Percentiles tab._"
     )
 
 
@@ -283,7 +288,7 @@ def show_tests_tab():
 
     st.markdown(
         "Use a small test to generate more accurate performance metrics for this creator. "
-        "If you skip the test, you can still approximate metrics from the live profile data."
+        "If you skip the test, you can still use synthetic metrics generated from the live profile data."
     )
 
     run_test_clicked = st.button("Run small test for this creator")
@@ -304,7 +309,25 @@ def show_tests_tab():
         st.markdown("### Test Results")
         st.json(st.session_state["test_results"])
     else:
-        st.info("No test has been run yet for this creator.")
+        st.info("No small test has been run yet for this creator.")
+
+        # If we have synthetic data, show a baseline here
+        synth = st.session_state.get("synthetic_data")
+        if synth:
+            st.markdown("### Synthetic Baseline (from live profile)")
+            summary = synth.get("summary", {})
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Avg daily impressions", summary.get("avg_impressions", 0))
+            with col2:
+                st.metric("Avg daily clicks", summary.get("avg_clicks", 0))
+            with col3:
+                st.metric("Avg daily subs", summary.get("avg_subs", 0))
+
+            st.caption(
+                "These are synthetic, realistic estimates generated from the creator's "
+                "OnlyFans profile stats. Run a small test above to replace them with real data."
+            )
 
 
 def show_percentiles_tab():
@@ -318,15 +341,15 @@ def show_percentiles_tab():
         # Original message
         st.warning("Run a small test first; we don't have percentile data.")
 
-        # New button: use live profile data instead
+        # Button: use live profile data instead (now uses synthetic engine)
         use_live = st.button("Use live OnlyFans profile data instead")
 
         if use_live:
-            with st.spinner("Computing approximate metrics from live profile data..."):
+            with st.spinner("Computing synthetic metrics from live profile data..."):
                 approx = compute_percentiles_from_live_profile(prof)
             st.session_state["percentile_data"] = approx
             percentile_data = approx
-            st.success("Approximate metrics added from live profile data.")
+            st.success("Synthetic metrics and percentile estimates added from live profile data.")
 
     if percentile_data:
         source = percentile_data.get("source", "unknown")
