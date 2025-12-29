@@ -1,691 +1,406 @@
-# app.py
+import re
+import json
+from typing import Dict, Any, Optional
 
-from typing import Dict, Optional
-
-import streamlit as st
+import numpy as np
 import pandas as pd
-
-from synthetic import (
-    generate_synthetic_cohort,
-    build_profile_percentiles,
-    build_pricing_percentiles,
-    percentile_band_label,
-    short_percentile,
-)
+import requests
+from bs4 import BeautifulSoup
+import streamlit as st
 
 
-# ---------- Page config & global styles ----------
+# -----------------------------
+# OnlyFans scraping utilities
+# -----------------------------
+
+def _parse_human_number(text: str) -> Optional[int]:
+    """
+    Convert strings like '4.5K', '10.2M', '12,345' to an integer.
+    Returns None if it cannot be parsed.
+    """
+    if not text:
+        return None
+    t = text.strip().lower().replace(",", "")
+    match = re.match(r"^([0-9]*\.?[0-9]+)\s*([km])?$", t)
+    if not match:
+        # Maybe it's a plain integer like "1234"
+        if t.isdigit():
+            return int(t)
+        return None
+
+    num = float(match.group(1))
+    suffix = match.group(2)
+
+    if suffix == "k":
+        num *= 1_000
+    elif suffix == "m":
+        num *= 1_000_000
+
+    return int(num)
+
+
+def fetch_onlyfans_profile(handle: str) -> Dict[str, Any]:
+    """
+    Scrape a public OnlyFans profile and estimate:
+      - followers (fans)
+      - avg_views (heuristic from followers)
+      - engagement_rate (heuristic from likes and followers)
+      - avg_cpm (simple assumption)
+    This relies mainly on the meta description text, which commonly
+    contains patterns like: '... 10.5K likes and 2.3K fans ...'
+
+    NOTE:
+      - This WILL break if OnlyFans changes their HTML structure.
+      - This does NOT bypass logins or protected content. It only uses
+        public metadata (meta tags).
+    """
+    username = handle.strip().lstrip("@").strip("/")
+    if not username:
+        raise ValueError("Handle is empty after cleaning. Please provide a valid OnlyFans username.")
+
+    url = f"https://onlyfans.com/{username}"
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    resp = requests.get(url, headers=headers, timeout=20)
+
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Failed to load OnlyFans profile page (status {resp.status_code}). "
+            f"URL tried: {url}"
+        )
+
+    html = resp.text
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Try to extract numbers from the meta description.
+    meta_desc_tag = soup.find("meta", attrs={"name": "description"})
+    followers = None
+    likes = None
+
+    if meta_desc_tag and meta_desc_tag.get("content"):
+        desc = meta_desc_tag["content"]
+
+        # Example patterns: '10.5K likes', '2.3K fans'
+        likes_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+likes", desc)
+        fans_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+fans", desc)
+
+        if likes_match:
+            likes_str = likes_match.group(1)
+            likes = _parse_human_number(likes_str)
+
+        if fans_match:
+            fans_str = fans_match.group(1)
+            followers = _parse_human_number(fans_str)
+
+    # Fallbacks if we didn't find what we expected
+    if followers is None:
+        # Try to find something else, extremely heuristic:
+        # Look for "[number] fans" anywhere in the HTML text.
+        text = soup.get_text(separator=" ", strip=True)
+        fans_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+fans", text)
+        if fans_match:
+            followers = _parse_human_number(fans_match.group(1))
+
+    if followers is None and likes is None:
+        raise RuntimeError(
+            "Could not extract fans/likes from OnlyFans page. "
+            "The page structure may have changed or the profile may be private."
+        )
+
+    # If we still don't have followers but we do have likes, make a rough guess
+    if followers is None and likes is not None:
+        # Assume engagement ~ 5–15 likes per 100 followers
+        followers = max(int(likes / 0.1), likes)
+
+    # Derive average views as a heuristic (e.g., 20–40% of followers)
+    avg_views = int(followers * 0.3)
+
+    # Approximate engagement from likes if available
+    if likes is not None and followers > 0:
+        engagement_rate = round((likes / followers) * 100, 2)
+    else:
+        # Generic OF creator engagement guess
+        engagement_rate = 3.5
+
+    # CPM is extremely rough; this is where you can plug your own model
+    avg_cpm = 20.0
+
+    return {
+        "platform": "OnlyFans",
+        "handle": username,
+        "followers": followers,
+        "avg_views": avg_views,
+        "engagement_rate": engagement_rate,  # %
+        "avg_cpm": avg_cpm,                 # USD
+        "raw_source": "onlyfans_meta_description",
+    }
+
+
+def fetch_creator_profile_from_web(handle: str, platform: str) -> Dict[str, Any]:
+    """
+    Dispatcher for web lookups by platform.
+
+    Returns a dict with at least:
+      - followers
+      - avg_views
+      - engagement_rate
+      - avg_cpm
+    """
+    platform_norm = platform.strip().lower()
+
+    if not handle:
+        raise ValueError("Handle cannot be empty.")
+
+    if platform_norm == "onlyfans":
+        return fetch_onlyfans_profile(handle)
+
+    # You can extend this for other platforms:
+    # elif platform_norm == "instagram": ...
+    # elif platform_norm == "tiktok": ...
+    # etc.
+    raise NotImplementedError(f"Web lookup not implemented for platform: {platform}")
+
+
+# -----------------------------
+# Analytics / synthetic cohort
+# -----------------------------
+
+def generate_synthetic_cohort(
+    followers: int,
+    avg_views: float,
+    engagement_rate: float,
+    avg_cpm: float,
+    n: int = 1000,
+) -> pd.DataFrame:
+    """
+    Generate a synthetic cohort of similar creators to benchmark against.
+    Very simple probabilistic model around the given stats.
+    """
+
+    followers = max(followers, 1)
+    base_log = np.log(followers)
+
+    # Followers: log-normal spread around the creator's follower count
+    followers_dist = np.random.lognormal(mean=base_log, sigma=0.4, size=n).astype(int)
+
+    # Views: normally 20–50% of followers, centered around creator's ratio
+    creator_view_ratio = avg_views / followers if followers > 0 else 0.3
+    creator_view_ratio = np.clip(creator_view_ratio, 0.05, 0.8)
+    view_ratios = np.random.normal(loc=creator_view_ratio, scale=0.05, size=n)
+    view_ratios = np.clip(view_ratios, 0.02, 0.9)
+    views_dist = (followers_dist * view_ratios).astype(int)
+
+    # Engagement rate: normal around creator's ER ± 1.5pp
+    er_mean = np.clip(engagement_rate, 0.1, 50.0)
+    er_dist = np.random.normal(loc=er_mean, scale=1.5, size=n)
+    er_dist = np.clip(er_dist, 0.1, 80.0)
+
+    # CPM: log-normal around creator's CPM
+    cpm_base = max(avg_cpm, 0.5)
+    log_cpm_mean = np.log(cpm_base)
+    cpm_dist = np.random.lognormal(mean=log_cpm_mean, sigma=0.35, size=n)
+
+    df = pd.DataFrame(
+        {
+            "followers": followers_dist,
+            "avg_views": views_dist,
+            "engagement_rate": er_dist,
+            "avg_cpm": cpm_dist,
+        }
+    )
+
+    return df
+
+
+def percentile_rank(series: pd.Series, value: float) -> float:
+    """Return the percentile rank of `value` within `series`."""
+    if len(series) == 0:
+        return 0.0
+    return round(100.0 * (series < value).mean(), 2)
+
+
+# -----------------------------
+# Streamlit app
+# -----------------------------
 
 st.set_page_config(
-    page_title="Creator Revenue Lab",
-    page_icon="💸",
+    page_title="Creator Earnings Benchmark",
+    page_icon="📊",
     layout="wide",
 )
 
-CUSTOM_CSS = """
-<style>
-/* Base */
-body {
-    background: radial-gradient(circle at top left, #0f172a, #020617 55%);
-    color: #e5e7eb;
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-}
-section.main > div {
-    padding-top: 1.25rem;
-}
+st.title("Creator Earnings Benchmark & OnlyFans Lookup")
 
-/* Headline gradient text */
-.gradient-text {
-    background: linear-gradient(120deg, #22c55e, #a855f7, #ec4899);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-}
+# --- Session state ---
+if "web_profile" not in st.session_state:
+    st.session_state.web_profile = None
+if "cohort_df" not in st.session_state:
+    st.session_state.cohort_df = None
 
-/* Glass panels */
-.glass-panel {
-    background: radial-gradient(circle at top left, rgba(15,23,42,0.95), rgba(15,23,42,0.85));
-    border-radius: 18px;
-    border: 1px solid rgba(148,163,184,0.25);
-    box-shadow: 0 18px 45px rgba(15,23,42,0.75);
-    padding: 1.4rem 1.6rem;
-}
+# --- Sidebar: lookup and inputs ---
+st.sidebar.header("1. Lookup Creator Profile")
 
-/* Feature cards */
-.feature-card {
-    background: radial-gradient(circle at top left, rgba(30,64,175,0.35), rgba(15,23,42,0.98));
-    border-radius: 16px;
-    border: 1px solid rgba(96,165,250,0.45);
-    padding: 1rem 1.2rem;
-}
+platform = st.sidebar.selectbox(
+    "Platform",
+    options=["OnlyFans", "Instagram", "TikTok", "YouTube"],
+    index=0,
+)
 
-/* Pills & badges */
-.pill {
-    display: inline-flex;
-    align-items: center;
-    padding: 0.2rem 0.7rem;
-    border-radius: 999px;
-    font-size: 0.72rem;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    border: 1px solid rgba(148,163,184,0.6);
-    background: radial-gradient(circle at top left, rgba(30,64,175,0.6), rgba(15,23,42,0.95));
-    color: #e5e7eb;
-}
-.badge-soft {
-    display: inline-flex;
-    align-items: center;
-    padding: 0.25rem 0.65rem;
-    border-radius: 999px;
-    font-size: 0.7rem;
-    background: rgba(15,118,110,0.22);
-    border: 1px solid rgba(45,212,191,0.55);
-    color: #a5f3fc;
-}
-
-/* Metric cards */
-.metric-card {
-    background: radial-gradient(circle at top left, rgba(15,23,42,0.98), rgba(15,23,42,0.9));
-    border-radius: 14px;
-    border: 1px solid rgba(148,163,184,0.4);
-    padding: 0.85rem 1rem;
-}
-.metric-label {
-    font-size: 0.75rem;
-    color: #9ca3af;
-}
-.metric-value {
-    font-size: 1.2rem;
-    font-weight: 600;
-    color: #e5e7eb;
-}
-.metric-sub {
-    font-size: 0.7rem;
-    color: #6b7280;
-}
-
-/* Tabs */
-.stTabs [role="tablist"] {
-    gap: 0.5rem;
-}
-.stTabs [role="tab"] {
-    padding-top: 0.5rem;
-    padding-bottom: 0.5rem;
-    border-radius: 999px !important;
-}
-</style>
-"""
-
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+handle = st.sidebar.text_input(
+    "Creator handle / username",
+    placeholder="@creatorname or creatorname",
+)
 
 
-# ---------- Web lookup hook (this is where you plug your old scraper) ----------
-
-def fetch_creator_profile_from_web(handle: str, platform: str) -> Optional[Dict]:
-    """
-    LOOKUP HOOK: Replace the body of this function with your original scraping / API logic.
-
-    Expected return shape (keys are all optional, but these are what the app uses):
-      {
-          "handle": str,
-          "platform": str,
-          "followers": int,
-          "avg_views": int,
-          "engagement_rate": float,   # 0–1, not percent
-          "avg_cpm": float            # optional
-      }
-
-    Return None if lookup fails (e.g. profile not found, error, etc).
-    """
-    # ------- TODO: REPLACE THIS STUB WITH YOUR REAL IMPLEMENTATION -------
-    # Example stub just to prove wiring works; REMOVE this and drop your old code in:
-    # if platform == "OnlyFans":
-    #     return {
-    #         "handle": handle.lstrip("@"),
-    #         "platform": platform,
-    #         "followers": 120_000,
-    #         "avg_views": 40_000,
-    #         "engagement_rate": 0.08,
-    #         "avg_cpm": 30.0,
-    #     }
-    # return None
-    return None
-    # ---------------------------------------------------------------------
-
-
-# ---------- Helpers ----------
-
-def get_profile_id(profile: Dict) -> str:
-    if not profile:
-        return "none"
-    for key in ("handle", "username", "creator_id", "id"):
-        if key in profile and profile[key]:
-            return str(profile[key]).lower()
-    return str(hash(repr(sorted(profile.items()))))
-
-
-@st.cache_data(show_spinner=False)
-def get_synthetic_for_profile(profile: Dict) -> pd.DataFrame:
-    return generate_synthetic_cohort(profile)
-
-
-def format_number(v: Optional[float]) -> str:
-    if v is None:
-        return "—"
+if st.sidebar.button("Lookup from web"):
     try:
-        v = float(v)
-    except Exception:
-        return "—"
-    if v >= 1_000_000:
-        return f"{v/1_000_000:.1f}M"
-    if v >= 1_000:
-        return f"{v/1_000:.1f}K"
-    return f"{v:.0f}"
+        with st.spinner(f"Looking up {handle} on {platform}..."):
+            profile = fetch_creator_profile_from_web(handle, platform)
+        st.session_state.web_profile = profile
+        st.sidebar.success("Profile data fetched from web.")
+    except NotImplementedError as e:
+        st.sidebar.error(str(e))
+    except Exception as e:
+        st.sidebar.error(f"Lookup failed: {e}")
 
+st.sidebar.markdown("---")
+st.sidebar.header("2. Override / Confirm Stats")
 
-def format_pct(v: Optional[float], decimals: int = 1) -> str:
-    if v is None:
-        return "—"
-    return f"{v*100:.{decimals}f}%"
+# Defaults from web profile if available
+wp = st.session_state.web_profile or {}
 
+followers_default = wp.get("followers", 10_000)
+avg_views_default = wp.get("avg_views", 3_000)
+engagement_default = wp.get("engagement_rate", 3.5)
+cpm_default = wp.get("avg_cpm", 20.0)
 
-def simple_pricing_fallback(profile: Dict) -> Dict:
-    """
-    Fallback pricing logic that does NOT depend on any external engines.
-    """
-    views = float(profile.get("avg_views") or profile.get("avg_video_views") or 0)
-    followers = float(profile.get("followers") or profile.get("follower_count") or 0)
-    engagement_rate = float(profile.get("engagement_rate") or 0.05)
+followers_input = st.sidebar.number_input(
+    "Followers / fans",
+    min_value=1,
+    value=int(followers_default),
+    step=100,
+    help="If web lookup failed, set this manually.",
+)
 
-    if followers < 50_000:
-        base_cpm = 18
-    elif followers < 250_000:
-        base_cpm = 25
-    elif followers < 1_000_000:
-        base_cpm = 35
+avg_views_input = st.sidebar.number_input(
+    "Average views per post",
+    min_value=1,
+    value=int(avg_views_default),
+    step=100,
+)
+
+engagement_input = st.sidebar.number_input(
+    "Engagement rate (%)",
+    min_value=0.1,
+    max_value=100.0,
+    value=float(engagement_default),
+    step=0.1,
+)
+
+cpm_input = st.sidebar.number_input(
+    "Average CPM (USD)",
+    min_value=0.5,
+    max_value=1000.0,
+    value=float(cpm_default),
+    step=0.5,
+)
+
+generate_btn = st.sidebar.button("Generate synthetic cohort & benchmarks")
+
+# -----------------------------
+# Main layout
+# -----------------------------
+
+col_main, col_side = st.columns([3, 2])
+
+with col_main:
+    st.subheader("Creator profile")
+
+    if st.session_state.web_profile:
+        st.markdown("**Loaded from web lookup:**")
+        st.json(st.session_state.web_profile)
     else:
-        base_cpm = 45
-
-    base_cpm *= (1 + (engagement_rate - 0.04) * 4.0)
-
-    if views <= 0:
-        views = followers * 0.20
-
-    low_cpm = base_cpm * 0.8
-    high_cpm = base_cpm * 1.35
-
-    recommended_price = (views / 1000.0) * base_cpm
-    low_price = (views / 1000.0) * low_cpm
-    high_price = (views / 1000.0) * high_cpm
-
-    return {
-        "recommended_price": float(recommended_price),
-        "low_price": float(low_price),
-        "high_price": float(high_price),
-        "base_cpm": float(base_cpm),
-        "low_cpm": float(low_cpm),
-        "high_cpm": float(high_cpm),
-        "currency": "USD",
-        "explanation": "Heuristic CPM based on audience size & engagement (fallback only).",
-    }
-
-
-# ---------- Step 1: Creator lookup with web fetch + manual override ----------
-
-def render_creator_lookup() -> Optional[Dict]:
-    # Session defaults for pre-filling after a web lookup
-    if "prefill_profile" not in st.session_state:
-        st.session_state["prefill_profile"] = {}
-
-    prefill = st.session_state["prefill_profile"]
-
-    st.markdown(
-        """
-        <div class="glass-panel">
-          <div class="pill">Step 1 · Load a Creator</div>
-          <h2 style="margin-top:0.75rem;margin-bottom:0.35rem;">Creator profile input</h2>
-          <p style="font-size:0.86rem;color:#9ca3af;">
-            Enter a handle and platform to fetch stats, or just plug in your own estimates. Once loaded, the lab
-            spins up a synthetic peer set and unlocks pricing, whales, and DM angles.
-          </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    col_handle, col_platform = st.columns([2, 1])
-    with col_handle:
-        handle = st.text_input(
-            "Creator handle or @username",
-            placeholder="@creator",
-            value=prefill.get("handle", ""),
-        )
-    with col_platform:
-        platform = st.selectbox(
-            "Platform",
-            ["Instagram", "TikTok", "YouTube", "OnlyFans", "Other"],
-            index=["Instagram", "TikTok", "YouTube", "OnlyFans", "Other"].index(
-                prefill.get("platform", "Instagram")
-            ),
-        )
-
-    col_lookup, col_hint = st.columns([1, 3])
-    with col_lookup:
-        lookup_clicked = st.button("Lookup from web", use_container_width=True)
-    with col_hint:
-        st.write(
-            "<span style='font-size:0.8rem;color:#6b7280;'>"
-            "Web lookup will try to scrape/populate stats (like it used to). You can then tweak them manually."
-            "</span>",
-            unsafe_allow_html=True,
-        )
-
-    # Web lookup: call your scraper, store result into session, rerun to prefill fields
-    if lookup_clicked:
-        if not handle.strip():
-            st.warning("Enter a handle before running web lookup.")
-        else:
-            with st.spinner("Looking up profile from the web…"):
-                fetched = fetch_creator_profile_from_web(handle.strip(), platform)
-            if not fetched:
-                st.error("Could not fetch profile from the web. Check handle/platform or try manual stats.")
-            else:
-                # Normalize and store into prefill for the next rerun
-                st.session_state["prefill_profile"] = {
-                    "handle": fetched.get("handle") or handle.strip(),
-                    "platform": fetched.get("platform") or platform,
-                    "followers": int(fetched.get("followers") or 0),
-                    "avg_views": int(fetched.get("avg_views") or 0),
-                    "engagement_rate": float(fetched.get("engagement_rate") or 0.0),
-                    "avg_cpm": float(fetched.get("avg_cpm") or 0.0),
-                }
-                st.success("Profile fetched. Fields below have been updated.")
-                st.experimental_rerun()
-
-    st.markdown("##### Key stats (edit or override any value)")
-
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        followers = st.number_input(
-            "Followers",
-            min_value=0,
-            step=1000,
-            value=int(prefill.get("followers", 0)),
-        )
-    with c2:
-        avg_views = st.number_input(
-            "Avg views / story",
-            min_value=0,
-            step=1000,
-            value=int(prefill.get("avg_views", 0)),
-        )
-    with c3:
-        er_default_percent = (
-            prefill.get("engagement_rate", 0.0) * 100.0
-            if prefill.get("engagement_rate") is not None
-            else 0.0
-        )
-        engagement_rate = st.number_input(
-            "Engagement rate (%)",
-            min_value=0.0,
-            max_value=100.0,
-            step=0.1,
-            value=float(er_default_percent),
-        )
-    with c4:
-        avg_cpm = st.number_input(
-            "Known CPM (optional)",
-            min_value=0.0,
-            step=1.0,
-            value=float(prefill.get("avg_cpm", 0.0)),
-        )
-
-    col_btn, col_hint2 = st.columns([1, 3])
-    with col_btn:
-        load_clicked = st.button("Load creator →", type="primary", use_container_width=True)
-    with col_hint2:
-        st.write(
-            "<span style='font-size:0.8rem;color:#6b7280;'>"
-            "If lookup failed or was off, just edit these numbers and load the creator."
-            "</span>",
-            unsafe_allow_html=True,
-        )
-
-    if not load_clicked:
-        return None
-
-    if followers <= 0 and avg_views <= 0:
-        st.warning("Please provide at least followers or average views.")
-        return None
-
-    profile = {
-        "handle": handle.strip() or prefill.get("handle") or None,
-        "platform": platform,
-        "followers": int(followers) if followers else None,
-        "avg_views": int(avg_views) if avg_views else None,
-        "engagement_rate": (engagement_rate / 100.0) if engagement_rate else None,
-        "avg_cpm": float(avg_cpm) if avg_cpm else None,
-    }
-
-    st.session_state["creator_profile"] = profile
-    st.session_state["profile_id"] = get_profile_id(profile)
-
-    st.success("Creator loaded. Scroll down to see pricing & labs.")
-
-    return profile
-
-
-def render_profile_header(profile: Dict, profile_percentiles: Dict):
-    followers = profile.get("followers")
-    views = profile.get("avg_views")
-    er = profile.get("engagement_rate")
-
-    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-    with c1:
-        st.markdown(
-            f"""
-            <div class="glass-panel" style="padding:0.9rem 1rem;">
-              <div class="pill">Profile loaded</div>
-              <h3 style="margin-top:0.55rem;margin-bottom:0.15rem;">
-                {profile.get("handle") or "Unnamed creator"}
-              </h3>
-              <p style="font-size:0.8rem;color:#9ca3af;margin:0;">
-                {profile.get("platform","Platform not set")} • Synthetic peer set generated
-              </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with c2:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-              <div class="metric-label">Followers</div>
-              <div class="metric-value">{format_number(followers)}</div>
-              <div class="metric-sub">
-                vs peers: {short_percentile(profile_percentiles.get("followers_pct"))}
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with c3:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-              <div class="metric-label">Avg views</div>
-              <div class="metric-value">{format_number(views)}</div>
-              <div class="metric-sub">
-                vs peers: {short_percentile(profile_percentiles.get("views_pct"))}
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with c4:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-              <div class="metric-label">Engagement</div>
-              <div class="metric-value">
-                {format_pct(er) if er is not None else "—"}
-              </div>
-              <div class="metric-sub">
-                vs peers: {short_percentile(profile_percentiles.get("engagement_pct"))}
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-
-# ---------- Smart Price Lab ----------
-
-def render_smart_price_tab(profile: Optional[Dict], cohort_df: Optional[pd.DataFrame]):
-    st.markdown(
-        """
-        <div class="pill" style="margin-bottom:0.4rem;">Lab 1 · Smart Price</div>
-        <h3 style="margin-top:0;margin-bottom:0.25rem;">Anchor this deal the sane way</h3>
-        <p style="font-size:0.85rem;color:#9ca3af;margin-bottom:0.4rem;">
-          We take your inputs + a synthetic peer set to triangulate a price band, then benchmark your ask vs similar creators.
-        </p>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if not profile or cohort_df is None or cohort_df.empty:
-        st.info("Load a creator above to generate a synthetic peer set and pricing band.")
-        return
-
-    c1, c2, c3 = st.columns([1.6, 1, 1])
-    with c1:
-        offer_type = st.selectbox(
-            "Deliverable",
-            [
-                "1 × Story (single frame)",
-                "3-frame Story sequence",
-                "1 × Reel / TikTok",
-                "Reel + Story amplification",
-                "Custom package",
-            ],
-        )
-    with c2:
-        usage = st.selectbox(
-            "Usage",
-            ["Organic only", "Spark/whitelist 30d", "Spark/whitelist 90d", "Full paid + cutdowns"],
-        )
-    with c3:
-        urgency = st.selectbox("Urgency", ["Flexible", "Standard", "Rush"])
-
-    st.divider()
-
-    pricing_result = simple_pricing_fallback(profile)
-
-    rec_price = pricing_result.get("recommended_price")
-    low_price = pricing_result.get("low_price")
-    high_price = pricing_result.get("high_price")
-    currency = pricing_result.get("currency", "USD")
-
-    rec_display = f"{currency} {rec_price:,.0f}" if rec_price is not None else "—"
-    if low_price is not None and high_price is not None:
-        band_display = f"{currency} {low_price:,.0f} – {currency} {high_price:,.0f}"
-    else:
-        band_display = "—"
-
-    price_pcts = build_pricing_percentiles(profile, cohort_df, rec_price)
-
-    ctop1, ctop2 = st.columns([1.4, 1])
-    with ctop1:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-              <div class="metric-label">Recommended ask</div>
-              <div class="metric-value">
-                {rec_display}
-              </div>
-              <div class="metric-sub">
-                Band: {band_display}
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with ctop2:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-              <div class="metric-label">Synthetic sanity check</div>
-              <div class="metric-sub" style="margin-top:0.2rem;margin-bottom:0.25rem;">
-                Price vs {len(cohort_df):,} lookalike creators
-              </div>
-              <div style="font-size:0.8rem;color:#e5e7eb;margin-bottom:0.2rem;">
-                {percentile_band_label(price_pcts.get("price_pct"))}
-              </div>
-              <div style="font-size:0.75rem;color:#9ca3af;">
-                Effective CPM vs peers: {percentile_band_label(price_pcts.get("cpm_pct"))}
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with st.expander("See synthetic peer distribution & explanation", expanded=False):
-        st.markdown(
-            """
-            **How this works**
-
-            - We generate a cohort of synthetic creators clustered around this profile's followers, views, and engagement.  
-            - For each synthetic creator we simulate a CPM and resulting package price.  
-            - Your recommended ask is positioned inside that distribution to show whether it's underpriced,
-              in-line, or aggressive.
-            """,
-            unsafe_allow_html=False,
-        )
-
-        show_table = st.checkbox("Show raw synthetic sample (head)", value=False)
-        if show_table:
-            st.dataframe(cohort_df.head(25), use_container_width=True)
-
-        st.caption(
-            "Synthetic cohort is regenerated if you materially change followers, views, or engagement."
-        )
-
-    if explanation := pricing_result.get("explanation"):
-        st.markdown(
-            f"<p style='font-size:0.8rem;color:#9ca3af;margin-top:0.6rem;'>{explanation}</p>",
-            unsafe_allow_html=True,
-        )
-
-
-# ---------- Whale Radar & DM Studio ----------
-
-def render_whale_radar_tab(profile: Optional[Dict], cohort_df: Optional[pd.DataFrame]):
-    st.markdown(
-        """
-        <div class="pill" style="margin-bottom:0.4rem;">Lab 2 · Whale Radar</div>
-        <h3 style="margin-top:0;margin-bottom:0.25rem;">Find brands that actually match this profile</h3>
-        <p style="font-size:0.85rem;color:#9ca3af;margin-bottom:0.4rem;">
-          Uses profile context + synthetic peers to bias toward brands that overpay for similar audiences.
-        </p>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if not profile or cohort_df is None or cohort_df.empty:
-        st.info("Load a creator above to generate whale brand ideas for this audience shape.")
-        return
-
-    st.write("• Example whale brand 1  \n• Example whale brand 2  \n• Example whale brand 3")
-    st.caption("Hook your real whale targeting logic into this tab; `profile` and `cohort_df` are available.")
-
-
-def render_dm_studio_tab(profile: Optional[Dict], cohort_df: Optional[pd.DataFrame]):
-    st.markdown(
-        """
-        <div class="pill" style="margin-bottom:0.4rem;">Lab 3 · DM Studio</div>
-        <h3 style="margin-top:0;margin-bottom:0.25rem;">Pitch lines tuned to their leverage</h3>
-        <p style="font-size:0.85rem;color:#9ca3af;margin-bottom:0.4rem;">
-          DM hooks and email subject lines that match their percentile position in the market.
-        </p>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if not profile or cohort_df is None or cohort_df.empty:
-        st.info("Load a creator above to get leverage-aware DM lines.")
-        return
-
-    st.write(
-        "“Hey [Brand], creators at this size usually see CPMs in the [X] band – "
-        "we've consistently driven above-benchmark performance on similar deals.”"
-    )
-    st.caption("Replace this with your DM engine; `profile` and synthetic context are available.")
-
-
-# ---------- Layout: hero + tools ----------
-
-def main():
-    # Hero
-    st.markdown(
-        """
-        <div style="margin-bottom:1.4rem;">
-          <div class="pill">Creator Revenue Lab</div>
-          <h1 class="gradient-text" style="font-size:2.4rem;margin-top:0.5rem;margin-bottom:0.4rem;">
-            Price, pitch & prospect like you’ve done this 1,000 times.
-          </h1>
-          <p style="font-size:0.95rem;color:#9ca3af;max-width:640px;">
-            Start with a single creator profile, then let the lab spin up a synthetic peer set, pressure-test your pricing,
-            and generate whale brand ideas & DM copy that match their leverage in the market.
-          </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Feature strip
-    fc1, fc2, fc3 = st.columns(3)
-    with fc1:
-        st.markdown(
-            """
-            <div class="feature-card">
-              <div class="badge-soft">Smart CPM bands</div>
-              <p style="font-size:0.8rem;color:#d1d5db;margin-top:0.4rem;margin-bottom:0;">
-                Synthetic pricing sanity check so you know if an ask is laughable, fair, or leaving money on the table.
-              </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with fc2:
-        st.markdown(
-            """
-            <div class="feature-card">
-              <div class="badge-soft">Whale targeting</div>
-              <p style="font-size:0.8rem;color:#d1d5db;margin-top:0.4rem;margin-bottom:0;">
-                Radar for brands that historically overpay for this exact audience shape.
-              </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with fc3:
-        st.markdown(
-            """
-            <div class="feature-card">
-              <div class="badge-soft">Leverage-aware copy</div>
-              <p style="font-size:0.8rem;color:#d1d5db;margin-top:0.4rem;margin-bottom:0;">
-                DM lines tuned to whether this creator is mid-pack or a quiet top 10% killer.
-              </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.info("No web profile loaded yet. Use the sidebar to look up a creator or enter stats manually.")
 
     st.markdown("---")
+    st.subheader("Benchmark vs similar creators")
 
-    # Step 1: lookup
-    saved_profile = st.session_state.get("creator_profile")
-    new_profile = render_creator_lookup()
-    profile = new_profile or saved_profile
+    if generate_btn:
+        with st.spinner("Generating synthetic cohort and benchmarks..."):
+            df = generate_synthetic_cohort(
+                followers=int(followers_input),
+                avg_views=float(avg_views_input),
+                engagement_rate=float(engagement_input),
+                avg_cpm=float(cpm_input),
+                n=1000,
+            )
+            st.session_state.cohort_df = df
 
-    cohort_df: Optional[pd.DataFrame] = None
-    profile_pcts: Dict = {}
-    if profile:
-        cohort_df = get_synthetic_for_profile(profile)
-        profile_pcts = build_profile_percentiles(profile, cohort_df)
-        render_profile_header(profile, profile_pcts)
-        st.markdown("")
+    df = st.session_state.cohort_df
 
-    # Tabs are always visible
-    tabs = st.tabs(["💸 Smart Price Lab", "🐋 Whale Radar", "✉️ DM Studio"])
+    if df is not None and len(df) > 0:
+        # Compute percentile ranks
+        p_followers = percentile_rank(df["followers"], followers_input)
+        p_views = percentile_rank(df["avg_views"], avg_views_input)
+        p_eng = percentile_rank(df["engagement_rate"], engagement_input)
+        p_cpm = percentile_rank(df["avg_cpm"], cpm_input)
 
-    with tabs[0]:
-        render_smart_price_tab(profile, cohort_df)
-    with tabs[1]:
-        render_whale_radar_tab(profile, cohort_df)
-    with tabs[2]:
-        render_dm_studio_tab(profile, cohort_df)
+        st.markdown("### Percentile positioning")
+        st.write(
+            f"- Followers: **{p_followers}th** percentile\n"
+            f"- Average views: **{p_views}th** percentile\n"
+            f"- Engagement rate: **{p_eng}th** percentile\n"
+            f"- CPM: **{p_cpm}th** percentile"
+        )
 
+        st.markdown("### Sample of synthetic cohort")
+        st.dataframe(df.head(20))
+    else:
+        st.info("Generate the synthetic cohort from the sidebar to see benchmarks here.")
 
-if __name__ == "__main__":
-    main()
+with col_side:
+    st.subheader("Earnings back-of-the-envelope")
+
+    st.markdown(
+        "This is a simple earnings estimate given your CPM and an assumed "
+        "number of monthly impressions."
+    )
+
+    monthly_posts = st.number_input(
+        "Estimated posts per month",
+        min_value=1,
+        max_value=1000,
+        value=30,
+    )
+
+    impressions_per_post = avg_views_input  # from sidebar
+    total_monthly_impressions = monthly_posts * impressions_per_post
+    estimated_monthly_earnings = (total_monthly_impressions / 1000.0) * cpm_input
+
+    st.metric(
+        label="Estimated monthly impressions",
+        value=f"{total_monthly_impressions:,.0f}",
+    )
+    st.metric(
+        label="Estimated monthly earnings (USD)",
+        value=f"${estimated_monthly_earnings:,.2f}",
+    )
+
+    st.caption(
+        "These are rough estimates only. For serious forecasting, plug in your real "
+        "impression data and a more sophisticated revenue model."
+    )
+
+st.markdown("---")
+st.caption(
+    "Note: OnlyFans scraping is based on public meta information and may break "
+    "if the site changes its structure. Always respect the platform's terms of service."
+)
