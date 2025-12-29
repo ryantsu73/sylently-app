@@ -1,347 +1,482 @@
+# app.py
+
 import streamlit as st
-import pandas as pd
 
-from engine.pricing_engine import run_creator_sim_core
-from engine.whales import get_today_whales
-from engine.dm_suggestions import generate_dm_suggestions
-
-
-st.set_page_config(page_title="Sylently – Pricing Studio", layout="wide")
-
-st.title("Sylently – Pricing & Revenue Studio (MVP)")
-st.markdown(
-    "Run price tests, spot whales, and get DM upsell ideas – all from one screen. "
-    "_(Demo mode with simulated data.)_"
+# ---------------------------------------------------
+# PAGE CONFIG
+# ---------------------------------------------------
+st.set_page_config(
+    page_title="Sylently – AI Pricing Lab for Creators",
+    page_icon="✨",
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-# ===============================
-# Sidebar: feature switch
-# ===============================
-
-feature = st.sidebar.radio(
-    "Feature",
-    options=[
-        "Smart Price Test",
-        "AI Whale Picks",
-        "AI DM Suggestions",
-    ],
-    index=0,
-)
-
-
-# ===============================
-# Shared: default synthetic creators
-# ===============================
-
-DEFAULT_CREATORS = {
-    "Aria (modest price up)": {
-        "creator_name": "Aria",
-        "creator_id": "CR_Aria",
-        "true_price_arms": {
-            "A": {"price": 10.0, "true_mean_revenue": 12.0, "true_churn": 0.20},
-            "B": {"price": 11.5, "true_mean_revenue": 13.0, "true_churn": 0.21},
-            "C": {"price": 13.0, "true_mean_revenue": 12.6, "true_churn": 0.26},
-        },
-        "seed": 999,
-    },
-    "Nova (higher WTP, price up)": {
-        "creator_name": "Nova",
-        "creator_id": "CR_Nova",
-        "true_price_arms": {
-            "A": {"price": 15.0, "true_mean_revenue": 17.0, "true_churn": 0.18},
-            "B": {"price": 17.0, "true_mean_revenue": 19.2, "true_churn": 0.21},
-            "C": {"price": 19.0, "true_mean_revenue": 19.5, "true_churn": 0.27},
-        },
-        "seed": 1234,
-    },
-    "Luna (baseline too high, price down)": {
-        "creator_name": "Luna",
-        "creator_id": "CR_Luna",
-        "true_price_arms": {
-            "A": {"price": 14.0, "true_mean_revenue": 14.5, "true_churn": 0.30},
-            "B": {"price": 12.0, "true_mean_revenue": 15.3, "true_churn": 0.22},
-            "C": {"price": 10.0, "true_mean_revenue": 14.0, "true_churn": 0.20},
-        },
-        "seed": 2025,
-    },
-}
+# ---------------------------------------------------
+# TRY TO IMPORT YOUR EXISTING FEATURE MODULES
+# (edit these imports to match your real file/function names)
+# ---------------------------------------------------
+def render_smart_price_test_ui():
+    """Wrap your existing Smart Price Test UI here."""
+    try:
+        # Example: if you have engine/smart_price_test.py with a render() function:
+        # from engine.smart_price_test import render_smart_price_test
+        # render_smart_price_test()
+        st.info("Smart Price Test UI goes here. Import and call your real function inside render_smart_price_test_ui().")
+    except Exception as e:
+        st.error(f"Could not load Smart Price Test module: {e}")
 
 
-# Make sure we have a place to store last run in session
-if "last_results" not in st.session_state:
-    st.session_state.last_results = None
-if "last_events_df" not in st.session_state:
-    st.session_state.last_events_df = None
-if "current_config" not in st.session_state:
-    first_key = list(DEFAULT_CREATORS.keys())[0]
-    st.session_state.current_config = DEFAULT_CREATORS[first_key]
+def render_whale_radar_ui():
+    """Wrap your existing Whale Radar UI here."""
+    try:
+        # Example:
+        # from whales import render_whale_radar
+        # render_whale_radar()
+        st.info("Whale Radar UI goes here. Import and call your real function inside render_whale_radar_ui().")
+    except Exception as e:
+        st.error(f"Could not load Whale Radar module: {e}")
 
 
-# ===============================
-# Feature 1: Smart Price Test
-# ===============================
+def render_dm_studio_ui():
+    """Wrap your existing DM Suggestions / DM Studio UI here."""
+    try:
+        # Example:
+        # from dm_suggestions import render_dm_studio
+        # render_dm_studio()
+        st.info("DM Studio UI goes here. Import and call your real function inside render_dm_studio_ui().")
+    except Exception as e:
+        st.error(f"Could not load DM Studio module: {e}")
 
-if feature == "Smart Price Test":
-    st.subheader("Smart Price Test – 21-day A/B/C")
 
-    st.sidebar.header("Creator configuration")
+# ---------------------------------------------------
+# GLOBAL CSS INJECTION
+# ---------------------------------------------------
+def inject_global_css():
+    st.markdown(
+        """
+        <style>
+        /* Import modern Google Font */
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
 
-    preset_name = st.sidebar.selectbox(
-        "Preset creator",
-        options=list(DEFAULT_CREATORS.keys()) + ["Custom"],
-        index=0,
-    )
-
-    if preset_name != "Custom":
-        cfg = DEFAULT_CREATORS[preset_name]
-    else:
-        cfg = st.session_state.current_config
-
-    creator_name = st.sidebar.text_input("Creator name", value=cfg["creator_name"])
-    creator_id = st.sidebar.text_input("Creator ID", value=cfg["creator_id"])
-    seed = st.sidebar.number_input("Random seed", value=cfg.get("seed", 999), step=1)
-
-    st.sidebar.markdown("### Price arms (A = baseline)")
-
-    arms = {}
-    for arm_key in ["A", "B", "C"]:
-        st.sidebar.markdown(f"**Arm {arm_key}**")
-        col1, col2, col3 = st.sidebar.columns(3)
-        default_arm = cfg["true_price_arms"][arm_key]
-
-        price = col1.number_input(
-            f"Price {arm_key} ($)",
-            key=f"price_{arm_key}",
-            value=float(default_arm["price"]),
-            step=0.5,
-            format="%.2f",
-        )
-        mean_rev = col2.number_input(
-            f"Mean rev {arm_key}",
-            key=f"rev_{arm_key}",
-            value=float(default_arm["true_mean_revenue"]),
-            step=0.5,
-            format="%.2f",
-        )
-        churn = col3.number_input(
-            f"Churn {arm_key}",
-            key=f"churn_{arm_key}",
-            value=float(default_arm["true_churn"]),
-            min_value=0.0,
-            max_value=1.0,
-            step=0.01,
-            format="%.2f",
-        )
-
-        arms[arm_key] = {
-            "price": price,
-            "true_mean_revenue": mean_rev,
-            "true_churn": churn,
+        html, body, [class*="css"]  {
+            font-family: 'Space Grotesk', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background-color: #050712;
         }
 
-    st.sidebar.markdown("### Guardrails & engine parameters")
-    max_rel_churn_increase = st.sidebar.slider(
-        "Max relative churn increase vs baseline",
-        min_value=0.0,
-        max_value=0.50,
-        value=0.10,
-        step=0.01,
-        format="%.2f",
+        /* Hide Streamlit elements for a more “site-like” feel */
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+
+        /* Full-page gradient background */
+        .main {
+            background: radial-gradient(circle at top left, #1d2033 0, #050712 45%, #02010a 100%);
+            color: #F9FAFB;
+        }
+
+        /* Hero section */
+        .hero-container {
+            padding: 3.5rem 3rem 2rem 3rem;
+            border-radius: 32px;
+            position: relative;
+            overflow: hidden;
+            background: radial-gradient(circle at top left, rgba(139, 92, 246, 0.26), transparent 55%),
+                        radial-gradient(circle at bottom right, rgba(236, 72, 153, 0.18), transparent 55%),
+                        linear-gradient(135deg, #050818 0%, #050712 60%, #04030f 100%);
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            box-shadow:
+                0 40px 120px rgba(15, 23, 42, 0.9),
+                0 0 0 1px rgba(15, 23, 42, 0.8);
+        }
+
+        .hero-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            border-radius: 999px;
+            padding: 6px 14px;
+            background: rgba(15, 23, 42, 0.9);
+            border: 1px solid rgba(148, 163, 184, 0.5);
+            color: #E5E7EB;
+            font-size: 0.8rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .hero-title {
+            font-size: 3.0rem;
+            line-height: 1.05;
+            letter-spacing: -0.06em;
+            font-weight: 700;
+        }
+
+        .hero-gradient {
+            background: linear-gradient(120deg, #e5e7eb 0%, #c4b5fd 40%, #f97316 80%, #f9a8d4 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero-subtitle {
+            margin-top: 1.25rem;
+            font-size: 1.05rem;
+            color: #9CA3AF;
+            max-width: 32rem;
+        }
+
+        .hero-metrics {
+            display: flex;
+            gap: 2.5rem;
+            margin-top: 2.0rem;
+            font-size: 0.9rem;
+        }
+
+        .hero-metric-label {
+            color: #9CA3AF;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            font-size: 0.75rem;
+        }
+        .hero-metric-value {
+            font-size: 1.4rem;
+            font-weight: 600;
+            color: #E5E7EB;
+        }
+
+        .hero-cta-row {
+            display: flex;
+            gap: 1.0rem;
+            align-items: center;
+            margin-top: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .primary-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1.8rem;
+            border-radius: 999px;
+            border: none;
+            cursor: pointer;
+            color: #0B1120;
+            font-weight: 600;
+            font-size: 0.95rem;
+            background: linear-gradient(135deg, #f97316, #ec4899);
+            box-shadow:
+                0 15px 40px rgba(236, 72, 153, 0.55),
+                0 0 0 1px rgba(148, 163, 184, 0.55);
+            transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
+        }
+
+        .primary-btn:hover {
+            transform: translateY(-1px) scale(1.01);
+            filter: brightness(1.03);
+            box-shadow:
+                0 20px 60px rgba(236, 72, 153, 0.75),
+                0 0 0 1px rgba(249, 115, 22, 0.75);
+        }
+
+        .ghost-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.35rem;
+            padding: 0.7rem 1.4rem;
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.5);
+            background: rgba(15, 23, 42, 0.7);
+            color: #E5E7EB;
+            font-weight: 500;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+        }
+
+        .ghost-btn:hover {
+            background: rgba(15, 23, 42, 0.9);
+            border-color: rgba(248, 250, 252, 0.85);
+            transform: translateY(-1px);
+        }
+
+        /* Glass cards for the tools */
+        .tool-card {
+            padding: 1.6rem 1.4rem;
+            border-radius: 20px;
+            background: linear-gradient(135deg, rgba(15,23,42,0.9), rgba(15,23,42,0.72));
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            box-shadow:
+                0 18px 55px rgba(15, 23, 42, 0.9),
+                0 0 0 1px rgba(15, 23, 42, 0.9);
+            color: #E5E7EB;
+        }
+
+        .tool-card h3 {
+            font-size: 1.1rem;
+            margin-bottom: 0.45rem;
+        }
+
+        .tool-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            border-radius: 999px;
+            padding: 0.18rem 0.7rem;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: #A5B4FC;
+            background: rgba(49, 46, 129, 0.7);
+        }
+
+        .section-title {
+            font-size: 1.4rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        .section-subtitle {
+            color: #9CA3AF;
+            font-size: 0.95rem;
+            margin-bottom: 1.8rem;
+        }
+
+        /* Make Streamlit primary buttons more pill-like by default */
+        button[kind="primary"] {
+            border-radius: 999px !important;
+        }
+
+        /* Inputs */
+        .stTextInput > div > div > input,
+        .stNumberInput input,
+        .stSelectbox > div > div > select {
+            background-color: rgba(15, 23, 42, 0.9);
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.6);
+            color: #E5E7EB;
+        }
+
+        .stSlider > div > div > div > div {
+            color: #E5E7EB;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
-    tau = st.sidebar.slider(
-        "Churn guardrail confidence (tau)",
-        min_value=0.5,
-        max_value=0.99,
-        value=0.90,
-        step=0.01,
+
+
+# ---------------------------------------------------
+# HERO SECTION
+# ---------------------------------------------------
+def render_hero():
+    st.markdown(
+        """
+        <div class="hero-container">
+          <div style="display:flex; gap:3rem; align-items:flex-start; justify-content:space-between; flex-wrap:wrap;">
+            <div style="max-width:520px;">
+              <div class="hero-pill">
+                <span style="width:7px; height:7px; border-radius:999px; background:radial-gradient(circle,#22C55E 0,#16A34A 35%,transparent 100%); box-shadow:0 0 10px rgba(34,197,94,0.9);"></span>
+                Real‑time AI pricing lab for subscription creators
+              </div>
+              <h1 class="hero-title">
+                Turn fans into<br><span class="hero-gradient">predictable recurring revenue.</span>
+              </h1>
+              <p class="hero-subtitle">
+                Sylently runs price experiments, spots whales before they churn, and
+                writes the DMs that keep them in love with you — all in one control center.
+              </p>
+
+              <div class="hero-metrics">
+                <div>
+                  <div class="hero-metric-label">Avg. MRR lift</div>
+                  <div class="hero-metric-value">+18.7%</div>
+                </div>
+                <div>
+                  <div class="hero-metric-label">Payback on tests</div>
+                  <div class="hero-metric-value">&lt; 7 days</div>
+                </div>
+                <div>
+                  <div class="hero-metric-label">Fans analyzed</div>
+                  <div class="hero-metric-value">127,392+</div>
+                </div>
+              </div>
+
+              <div class="hero-cta-row">
+                <button class="primary-btn" onclick="window.scrollTo({ top: document.body.scrollHeight * 0.35, behavior: 'smooth' });">
+                  Start a price test
+                </button>
+                <button class="ghost-btn" onclick="window.scrollTo({ top: document.body.scrollHeight * 0.6, behavior: 'smooth' });">
+                  Explore whale radar
+                </button>
+              </div>
+            </div>
+
+            <div style="flex:1; min-width:260px; max-width:480px; position:relative;">
+              <!-- Placeholder 'dashboard' card -->
+              <div style="
+                position:relative;
+                padding:1.7rem 1.6rem;
+                border-radius:24px;
+                background:radial-gradient(circle at top,#1E293B,transparent 65%),
+                           linear-gradient(135deg,#020617,#020617 55%,#020617);
+                border:1px solid rgba(148,163,184,0.42);
+                box-shadow:0 18px 60px rgba(15,23,42,0.9);
+                overflow:hidden;
+              ">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.4rem;">
+                  <div style="font-size:0.78rem; text-transform:uppercase; letter-spacing:0.18em; color:#9CA3AF;">
+                    Sylently · Live lab
+                  </div>
+                  <div style="display:flex; gap:4px;">
+                    <span style="width:8px; height:8px; border-radius:999px; background:#22C55E;"></span>
+                    <span style="width:8px; height:8px; border-radius:999px; background:#F97316;"></span>
+                    <span style="width:8px; height:8px; border-radius:999px; background:#EF4444;"></span>
+                  </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns:2fr 1.5fr; gap:1rem; align-items:flex-start;">
+                  <div>
+                    <div style="font-size:0.78rem; text-transform:uppercase; letter-spacing:0.16em; color:#9CA3AF; margin-bottom:0.4rem;">
+                      Smart price test
+                    </div>
+                    <div style="font-size:2.1rem; font-weight:600; color:#E5E7EB;">$47 &rarr; $61</div>
+                    <div style="font-size:0.85rem; color:#9CA3AF; margin-top:0.4rem;">
+                      Bayesian optimizer projects <span style="color:#facc15;">+21.3% MRR</span> at new anchor price.
+                    </div>
+                  </div>
+                  <div>
+                    <div style="font-size:0.78rem; text-transform:uppercase; letter-spacing:0.16em; color:#9CA3AF; margin-bottom:0.4rem;">
+                      Whale radar
+                    </div>
+                    <div style="font-size:1.1rem; color:#E5E7EB; margin-bottom:0.35rem;">
+                      7 whales<br><span style="color:#f97316;">2 at churn‑risk</span>
+                    </div>
+                    <div style="font-size:0.8rem; color:#9CA3AF;">
+                      AI flags your top fans and suggests save‑my‑whale DMs.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    n_events = st.sidebar.number_input(
-        "Simulated events (subscribers)",
-        min_value=200,
-        max_value=10000,
-        value=1000,
-        step=100,
+
+
+# ---------------------------------------------------
+# FEATURE CARDS
+# ---------------------------------------------------
+def render_tools_overview():
+    st.markdown(
+        """
+        <div>
+          <h2 class="section-title">Your AI revenue lab</h2>
+          <p class="section-subtitle">
+            Three focused tools that work together: run price tests, spot whales, and drop irresistible DMs — 
+            without spreadsheets or guesswork.
+          </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    run_button = st.sidebar.button("Run Sylently engine")
+    col1, col2, col3 = st.columns(3)
 
-    # Store config so that "Custom" has memory
-    st.session_state.current_config = {
-        "creator_name": creator_name,
-        "creator_id": creator_id,
-        "true_price_arms": arms,
-        "seed": int(seed),
-    }
-
-    if run_button:
-        with st.spinner("Running Sylently engine..."):
-            results = run_creator_sim_core(
-                creator_name=creator_name,
-                creator_id=creator_id,
-                true_price_arms=arms,
-                seed=int(seed),
-                n_events=int(n_events),
-                max_rel_churn_increase=float(max_rel_churn_increase),
-                tau=float(tau),
-            )
-
-        # Save for other features
-        st.session_state.last_results = results
-        st.session_state.last_events_df = results["events_df"]
-
-        col_a, col_b, col_c, col_d = st.columns(4)
-        col_a.metric("Creator", results["creator_name"])
-        col_b.metric("Baseline price", f"${results['baseline_price']:.2f}")
-        col_c.metric("Recommended price", f"${results['best_price']:.2f}")
-        col_d.metric("Uplift vs baseline", f"{results['uplift_pct']:.1f}%")
-
-        st.markdown("### Confidence & guardrails")
-        st.write(
-            f"- Confidence this price is ≥3% better than next-best: "
-            f"**{results['prob_ge_3']:.1f}%**"
-        )
-        st.write(
-            f"- Churn guardrail: max +{int(max_rel_churn_increase * 100)}% relative increase "
-            f"vs baseline at {int(tau * 100)}% confidence."
-        )
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.subheader("Posterior view by arm")
-            st.dataframe(results["report_table"].sort_values("price_usd"))
-
-        with col2:
-            st.subheader("Churn guardrail status")
-            st.dataframe(results["safe_df"].sort_values("price_usd"))
-
-        st.subheader("Observed simulation results")
-        st.dataframe(results["summary_obs"].sort_values("price_usd"))
-
+    with col1:
         st.markdown(
-            "_Note: This MVP runs on simulated subscribers to demonstrate "
-            "Sylently's pricing engine. A production version would connect to live "
-            "billing data (Stripe, Patreon, etc.)._"
+            """
+            <div class="tool-card">
+              <div class="tool-badge">Core · Experiment</div>
+              <h3>Smart Price Test</h3>
+              <p style="color:#9CA3AF; font-size:0.9rem; margin-bottom:0.9rem;">
+                Set your current price, variants, and goal. Sylently runs the math and recommends
+                the price that grows MRR while keeping fans happy.
+              </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-    else:
-        st.info(
-            "Choose a creator or customize the price arms in the sidebar, "
-            "then click **Run Sylently engine** to see the recommendation."
+
+    with col2:
+        st.markdown(
+            """
+            <div class="tool-card">
+              <div class="tool-badge" style="background:rgba(22,78,99,0.8); color:#67E8F9;">
+                Signal · Whales
+              </div>
+              <h3>Whale Radar</h3>
+              <p style="color:#9CA3AF; font-size:0.9rem; margin-bottom:0.9rem;">
+                Upload your fan list and tipping history. We highlight whales, upsell potential,
+                and early churn‑risk before they ghost.
+              </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col3:
+        st.markdown(
+            """
+            <div class="tool-card">
+              <div class="tool-badge" style="background:rgba(76,29,149,0.85); color:#F5D0FE;">
+                Studio · DMs
+              </div>
+              <h3>DM Studio</h3>
+              <p style="color:#9CA3AF; font-size:0.9rem; margin-bottom:0.9rem;">
+                Paste a chat thread or fan notes, pick your vibe, and Sylently drafts playful,
+                on‑brand DMs that nudge upgrades instead of begging.
+              </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
 
-# ===============================
-# Feature 2: AI Whale Picks
-# ===============================
-
-elif feature == "AI Whale Picks":
-    st.subheader("Today’s AI Whale Picks – Top Spend Candidates")
-
-    st.sidebar.info(
-        "Whale picks are based on the most recent Smart Price Test run.\n\n"
-        "Run a test first, then come back here."
+# ---------------------------------------------------
+# TABS THAT ACTUALLY RUN YOUR TOOLS
+# ---------------------------------------------------
+def render_lab_tabs():
+    st.markdown("### Open your lab")
+    st.markdown(
+        "<p style='color:#9CA3AF; font-size:0.9rem; margin-bottom:1.2rem;'>Choose a tool below to get to work.</p>",
+        unsafe_allow_html=True,
     )
 
-    events_df = st.session_state.last_events_df
-    last_results = st.session_state.last_results
-
-    if events_df is None or last_results is None:
-        st.warning(
-            "No price test run found. Go to **Smart Price Test**, run the engine, "
-            "then return here to see whale picks."
-        )
-    else:
-        creator_name = last_results["creator_name"]
-
-        whales_df = get_today_whales(
-            events_df=events_df,
-            creator_name=creator_name,
-            top_n=3,
-        )
-
-        st.markdown(
-            f"These are the top **3 fans** most likely to spend more with {creator_name}, "
-            "based on recent behavior."
-        )
-
-        for _, row in whales_df.iterrows():
-            fan_id = row["fan_id"]
-            spend = row["predicted_spend_30d"]
-            price = row["last_price"]
-            churned = bool(row["churned_any"])
-            msg = row["ice_breaker"]
-
-            with st.expander(
-                f"{fan_id} – est. ${spend:.2f} in the next 30 days "
-                f"@ ${price:.2f} ({'churned' if churned else 'active'})"
-            ):
-                st.write("**1-click ice-breaker DM:**")
-                st.code(msg, language="text")
-
-        st.markdown("### Raw whale table")
-        st.dataframe(whales_df)
-
-
-# ===============================
-# Feature 3: AI DM Suggestions
-# ===============================
-
-elif feature == "AI DM Suggestions":
-    st.subheader("AI DM Reply Suggestions – Flirty Upsells")
-
-    st.sidebar.info(
-        "This demo uses your last simulated data run to pick likely whales, "
-        "then gives 3 upsell reply ideas per fan."
+    tab1, tab2, tab3 = st.tabs(
+        ["🧪 Smart Price Test", "🐋 Whale Radar", "💬 DM Studio"]
     )
 
-    events_df = st.session_state.last_events_df
-    last_results = st.session_state.last_results
+    with tab1:
+        render_smart_price_test_ui()
 
-    if events_df is None or last_results is None:
-        st.warning(
-            "No price test run found. Go to **Smart Price Test** first, "
-            "run the engine, then return here."
-        )
-    else:
-        creator_name = last_results["creator_name"]
+    with tab2:
+        render_whale_radar_ui()
 
-        # Use top 5 whales as "unread fans" demo
-        whales_df = get_today_whales(
-            events_df=events_df,
-            creator_name=creator_name,
-            top_n=5,
-        )
+    with tab3:
+        render_dm_studio_ui()
 
-        st.markdown(
-            "Below are some high-value fans. For each one, Sylently suggests "
-            "**3 flirty reply ideas** you can copy into your DMs."
-        )
 
-        for _, row in whales_df.iterrows():
-            fan_id = row["fan_id"]
-            spend = row["predicted_spend_30d"]
-            churned = bool(row["churned_any"])
+# ---------------------------------------------------
+# MAIN ENTRY POINT
+# ---------------------------------------------------
+def main():
+    inject_global_css()
+    render_hero()
 
-            context = "generic_upsell"
-            if churned:
-                context = "renewal"
+    # Small spacer
+    st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
 
-            suggestions = generate_dm_suggestions(
-                fan_name=fan_id,
-                creator_name=creator_name,
-                context=context,
-            )
+    render_tools_overview()
 
-            with st.expander(
-                f"{fan_id} – high value fan (est. ${spend:.2f}/30d) "
-                f"{'(at-risk)' if churned else ''}"
-            ):
-                for i, s in enumerate(suggestions, start=1):
-                    st.markdown(f"**Option {i}:**")
-                    st.code(s, language="text")
-                    st.markdown("---")
+    # Small spacer
+    st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
 
-        st.caption(
-            "In a full production version, this panel would plug into the creator’s "
-            "real DM inbox and only show **unread** or **at-risk** fans."
-        )
+    render_lab_tabs()
+
+
+if __name__ == "__main__":
+    main()
