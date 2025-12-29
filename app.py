@@ -19,7 +19,7 @@ st.set_page_config(
 def render_smart_price_test_ui():
     """Wrap your existing Smart Price Test UI here."""
     try:
-        # Example: if you have engine/smart_price_test.py with a render() function:
+        # Example: if you have engine/pricing_engine.py with a render() function:
         # from engine.smart_price_test import render_smart_price_test
         # render_smart_price_test()
         st.info("Smart Price Test UI goes here. Import and call your real function inside render_smart_price_test_ui().")
