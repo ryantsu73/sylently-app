@@ -23,7 +23,6 @@ def _parse_human_number(text: str) -> Optional[int]:
     t = text.strip().lower().replace(",", "")
     match = re.match(r"^([0-9]*\.?[0-9]+)\s*([km])?$", t)
     if not match:
-        # Maybe it's a plain integer like "1234"
         if t.isdigit():
             return int(t)
         return None
@@ -47,14 +46,74 @@ def fetch_onlyfans_profile(handle: str) -> Dict[str, Any]:
       - engagement_rate (heuristic from likes and followers)
       - avg_cpm (simple assumption)
 
-    This uses public metadata only. If we cannot find any numbers,
-    we gracefully fall back to generic defaults instead of raising.
+    Additionally tries to pull:
+      - profile_name
+      - profile_image_url
+      - likes
+      - posts_count
+      - photos_count
+      - videos_count
+
+    Also returns simple ESTIMATES:
+      - estimated_subscribers
+      - estimated_monthly_visits
+
+    Uses public metadata only and NEVER raises on parsing issues.
+    On any failure, falls back to default values and records an 'error'
+    string plus a 'raw_source' flag so the UI can still work.
     """
     username = handle.strip().lstrip("@").strip("/")
     if not username:
-        raise ValueError("Handle is empty after cleaning. Please provide a valid OnlyFans username.")
+        return {
+            "platform": "OnlyFans",
+            "handle": handle,
+            "profile_name": handle or "Unknown",
+            "profile_image_url": None,
+            "followers": 5_000,
+            "likes": None,
+            "posts_count": None,
+            "photos_count": None,
+            "videos_count": None,
+            "avg_views": int(5_000 * 0.3),
+            "engagement_rate": 3.5,
+            "avg_cpm": 20.0,
+            "estimated_subscribers": 5_000,
+            "estimated_monthly_visits": 5_000 * 15,
+            "raw_source": "onlyfans_invalid_handle_fallback",
+            "error": "Handle was empty after cleaning.",
+        }
 
     url = f"https://onlyfans.com/{username}"
+
+    # Default values used whenever we can't parse real data
+    def make_fallback(raw_source: str, error: Optional[str] = None) -> Dict[str, Any]:
+        followers = 5_000
+        avg_views = int(followers * 0.3)
+        engagement_rate = 3.5
+        avg_cpm = 20.0
+        estimated_subscribers = followers
+        estimated_monthly_visits = followers * 15
+
+        data = {
+            "platform": "OnlyFans",
+            "handle": username,
+            "profile_name": username,
+            "profile_image_url": None,
+            "followers": followers,
+            "likes": None,
+            "posts_count": None,
+            "photos_count": None,
+            "videos_count": None,
+            "avg_views": avg_views,
+            "engagement_rate": engagement_rate,
+            "avg_cpm": avg_cpm,
+            "estimated_subscribers": estimated_subscribers,
+            "estimated_monthly_visits": estimated_monthly_visits,
+            "raw_source": raw_source,
+        }
+        if error:
+            data["error"] = error
+        return data
 
     headers = {
         "User-Agent": (
@@ -65,81 +124,104 @@ def fetch_onlyfans_profile(handle: str) -> Dict[str, Any]:
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    resp = requests.get(url, headers=headers, timeout=20)
-
-    if resp.status_code != 200:
-        # Still a hard failure here because the page itself isn't reachable.
-        raise RuntimeError(
-            f"Failed to load OnlyFans profile page (status {resp.status_code}). "
-            f"URL tried: {url}"
-        )
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+    except Exception as e:
+        # Network / HTTP error: fallback so the app never crashes
+        return make_fallback("onlyfans_http_error_fallback", error=str(e))
 
     html = resp.text
     soup = BeautifulSoup(html, "html.parser")
 
+    # ---------- Basic identity / image ----------
+
+    profile_name = None
+    profile_image_url = None
+
+    og_title = soup.find("meta", property="og:title")
+    if og_title and og_title.get("content"):
+        profile_name = og_title["content"].strip()
+
+    og_image = soup.find("meta", property="og:image")
+    if og_image and og_image.get("content"):
+        profile_image_url = og_image["content"].strip()
+
+    if not profile_name and soup.title and soup.title.string:
+        profile_name = soup.title.string.strip()
+
+    # ---------- Numeric stats ----------
+
     followers = None
     likes = None
+    posts_count = None
+    photos_count = None
+    videos_count = None
 
-    # 1) Try meta description first (old pattern)
+    # 1) Try meta description (common older pattern)
     meta_desc_tag = soup.find("meta", attrs={"name": "description"})
     if meta_desc_tag and meta_desc_tag.get("content"):
         desc = meta_desc_tag["content"]
 
-        # Example patterns: '10.5K likes', '2.3K fans'
         likes_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+[Ll]ikes", desc)
-        fans_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+[Ff]ans", desc)
+        fans_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+(fans|Fans)", desc)
+        posts_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+[Pp]osts?", desc)
+        photos_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+[Pp]hotos?", desc)
+        videos_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+[Vv]ideos?", desc)
 
         if likes_match:
-            likes_str = likes_match.group(1)
-            likes = _parse_human_number(likes_str)
-
+            likes = _parse_human_number(likes_match.group(1))
         if fans_match:
-            fans_str = fans_match.group(1)
-            followers = _parse_human_number(fans_str)
+            followers = _parse_human_number(fans_match.group(1))
+        if posts_match:
+            posts_count = _parse_human_number(posts_match.group(1))
+        if photos_match:
+            photos_count = _parse_human_number(photos_match.group(1))
+        if videos_match:
+            videos_count = _parse_human_number(videos_match.group(1))
 
-    # 2) If still missing, search in full page text more flexibly
-    if followers is None or likes is None:
-        text = soup.get_text(separator=" ", strip=True)
+    # 2) Search in full page text for any remaining stats
+    text = soup.get_text(separator=" ", strip=True)
 
-        if followers is None:
-            # look for "1234 fans" / "1234 followers"
-            fans_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+(fans|Followers?)", text)
-            if fans_match:
-                followers = _parse_human_number(fans_match.group(1))
+    if followers is None:
+        fans_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+(fans|Followers?)", text)
+        if fans_match:
+            followers = _parse_human_number(fans_match.group(1))
 
-        if likes is None:
-            # look for "1234 likes"
-            likes_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+[Ll]ikes", text)
-            if likes_match:
-                likes = _parse_human_number(likes_match.group(1))
+    if likes is None:
+        likes_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+[Ll]ikes", text)
+        if likes_match:
+            likes = _parse_human_number(likes_match.group(1))
 
-    # 3) If we truly found nothing, DO NOT raise – return a reasonable default
-    if followers is None and likes is None:
-        # Fallback generic profile – user can override in the sidebar
-        followers = 5_000
-        likes = None
-        avg_views = int(followers * 0.3)
-        engagement_rate = 3.5
-        avg_cpm = 20.0
+    if posts_count is None:
+        posts_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+[Pp]osts?", text)
+        if posts_match:
+            posts_count = _parse_human_number(posts_match.group(1))
 
-        return {
-            "platform": "OnlyFans",
-            "handle": username,
-            "followers": followers,
-            "avg_views": avg_views,
-            "engagement_rate": engagement_rate,
-            "avg_cpm": avg_cpm,
-            "raw_source": "onlyfans_fallback_no_numbers_found",
-        }
+    if photos_count is None:
+        photos_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+[Pp]hotos?", text)
+        if photos_match:
+            photos_count = _parse_human_number(photos_match.group(1))
 
-    # 4) Normal derivations when we have at least one signal
+    if videos_count is None:
+        videos_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+[Vv]ideos?", text)
+        if videos_match:
+            videos_count = _parse_human_number(videos_match.group(1))
+
+    # 3) If absolutely nothing numeric was found, use fallback defaults
+    if followers is None and likes is None and posts_count is None:
+        fb = make_fallback("onlyfans_fallback_no_numbers_found")
+        fb["profile_name"] = profile_name or username
+        fb["profile_image_url"] = profile_image_url
+        return fb
+
+    # 4) Derive core metrics
 
     if followers is None and likes is not None:
         # Rough guess: ~10% of followers like something at least once
         followers = max(int(likes / 0.1), likes)
 
     if followers is None:
-        # Absolute last resort
         followers = 5_000
 
     avg_views = int(followers * 0.3)
@@ -151,13 +233,25 @@ def fetch_onlyfans_profile(handle: str) -> Dict[str, Any]:
 
     avg_cpm = 20.0
 
+    # Simple ESTIMATES based on public data
+    estimated_subscribers = followers  # "fans" on OF ~= subscribers
+    estimated_monthly_visits = followers * 15  # assumption-based
+
     return {
         "platform": "OnlyFans",
         "handle": username,
+        "profile_name": profile_name or username,
+        "profile_image_url": profile_image_url,
         "followers": followers,
+        "likes": likes,
+        "posts_count": posts_count,
+        "photos_count": photos_count,
+        "videos_count": videos_count,
         "avg_views": avg_views,
         "engagement_rate": engagement_rate,
         "avg_cpm": avg_cpm,
+        "estimated_subscribers": estimated_subscribers,
+        "estimated_monthly_visits": estimated_monthly_visits,
         "raw_source": "onlyfans_meta_or_text",
     }
 
@@ -180,10 +274,7 @@ def fetch_creator_profile_from_web(handle: str, platform: str) -> Dict[str, Any]
     if platform_norm == "onlyfans":
         return fetch_onlyfans_profile(handle)
 
-    # You can extend this for other platforms:
-    # elif platform_norm == "instagram": ...
-    # elif platform_norm == "tiktok": ...
-    # etc.
+    # Extend here for other platforms if needed.
     raise NotImplementedError(f"Web lookup not implemented for platform: {platform}")
 
 
@@ -287,6 +378,7 @@ if st.sidebar.button("Lookup from web"):
     except NotImplementedError as e:
         st.sidebar.error(str(e))
     except Exception as e:
+        # Should be rare now; fetch_onlyfans_profile itself falls back safely
         st.sidebar.error(f"Lookup failed: {e}")
 
 st.sidebar.markdown("---")
@@ -305,7 +397,7 @@ followers_input = st.sidebar.number_input(
     min_value=1,
     value=int(followers_default),
     step=100,
-    help="If web lookup failed, set this manually.",
+    help="If web lookup failed or is approximate, set this manually.",
 )
 
 avg_views_input = st.sidebar.number_input(
@@ -343,8 +435,48 @@ with col_main:
     st.subheader("Creator profile")
 
     if st.session_state.web_profile:
-        st.markdown("**Loaded from web lookup:**")
-        st.json(st.session_state.web_profile)
+        profile = st.session_state.web_profile
+
+        # Top section: image + basic identity
+        header_cols = st.columns([1, 3])
+        with header_cols[0]:
+            if profile.get("profile_image_url"):
+                st.image(profile["profile_image_url"], width=140)
+        with header_cols[1]:
+            display_name = profile.get("profile_name") or profile.get("handle")
+            st.markdown(f"### {display_name}")
+            st.markdown(f"*Platform:* **{profile.get('platform', 'Unknown')}**")
+            st.markdown(f"*Handle:* `@{profile.get('handle')}`")
+
+            # Extra stats if present
+            extra_bits = []
+            if profile.get("followers") is not None:
+                extra_bits.append(f"**{profile['followers']:,}** fans")
+            if profile.get("likes") is not None:
+                extra_bits.append(f"**{profile['likes']:,}** likes")
+            if profile.get("posts_count") is not None:
+                extra_bits.append(f"**{profile['posts_count']:,}** posts")
+            if profile.get("photos_count") is not None:
+                extra_bits.append(f"**{profile['photos_count']:,}** photos")
+            if profile.get("videos_count") is not None:
+                extra_bits.append(f"**{profile['videos_count']:,}** videos")
+
+            if extra_bits:
+                st.markdown(" • ".join(extra_bits))
+
+            # Estimated metrics
+            est_subs = profile.get("estimated_subscribers")
+            est_visits = profile.get("estimated_monthly_visits")
+            if est_subs or est_visits:
+                st.markdown("#### Estimated audience metrics")
+                if est_subs:
+                    st.markdown(f"- Estimated subscribers (fans): **{est_subs:,.0f}**")
+                if est_visits:
+                    st.markdown(f"- Estimated monthly visits: **{est_visits:,.0f}**")
+
+        st.markdown("#### Raw profile data")
+        st.json(profile)
+
     else:
         st.info("No web profile loaded yet. Use the sidebar to look up a creator or enter stats manually.")
 
@@ -420,5 +552,6 @@ with col_side:
 st.markdown("---")
 st.caption(
     "Note: OnlyFans scraping is based on public meta information and may break "
-    "if the site changes its structure. Always respect the platform's terms of service."
+    "if the site changes its structure. Always respect the platform's terms of service. "
+    "Subscriber and visit metrics shown here are estimates derived from public data."
 )
