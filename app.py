@@ -4,7 +4,6 @@ import textwrap
 from typing import Dict, Optional
 
 import streamlit as st
-
 import pandas as pd
 
 from synthetic import (
@@ -234,7 +233,11 @@ def render_creator_lookup() -> Optional[Dict]:
     with col_handle:
         handle = st.text_input("Creator handle or @username", placeholder="@creator")
     with col_platform:
-        platform = st.selectbox("Platform", ["Instagram", "TikTok", "YouTube", "Other"], index=0)
+        platform = st.selectbox(
+            "Platform",
+            ["Instagram", "TikTok", "YouTube", "OnlyFans", "Other"],
+            index=0,
+        )
 
     st.markdown("##### Key stats")
     c1, c2, c3, c4 = st.columns(4)
@@ -401,6 +404,17 @@ def render_smart_price_tab(profile: Dict, cohort_df: pd.DataFrame):
     base_cpm = pricing_result.get("base_cpm")
     currency = pricing_result.get("currency", "USD")
 
+    # Display-friendly strings
+    if rec_price is not None:
+        rec_display = f"{currency} {rec_price:,.0f}"
+    else:
+        rec_display = "—"
+
+    if low_price is not None and high_price is not None:
+        band_display = f"{currency} {low_price:,.0f} – {currency} {high_price:,.0f}"
+    else:
+        band_display = "—"
+
     # Compute pricing percentiles
     price_pcts = build_pricing_percentiles(profile, cohort_df, rec_price)
 
@@ -411,11 +425,10 @@ def render_smart_price_tab(profile: Dict, cohort_df: pd.DataFrame):
             <div class="metric-card">
               <div class="metric-label">Recommended ask</div>
               <div class="metric-value">
-                {currency} {rec_price:,.0f} if rec_price is not None else "—"
+                {rec_display}
               </div>
               <div class="metric-sub">
-                Band: {currency} {low_price:,.0f} – {currency} {high_price:,.0f} 
-                {"" if (low_price and high_price) else ""}
+                Band: {band_display}
               </div>
             </div>
             """,
@@ -449,7 +462,6 @@ def render_smart_price_tab(profile: Dict, cohort_df: pd.DataFrame):
             - For each synthetic creator we simulate a CPM and resulting package price.  
             - Your recommended ask is positioned inside that distribution to show whether it's underpriced,
               in-line, or aggressive.
-
             """,
             unsafe_allow_html=False,
         )
@@ -462,7 +474,6 @@ def render_smart_price_tab(profile: Dict, cohort_df: pd.DataFrame):
             "Synthetic cohort is regenerated if you materially change followers, views, or engagement."
         )
 
-    # TODO: keep/extend any narrative copy from your existing pricing engine here
     if explanation := pricing_result.get("explanation"):
         st.markdown(
             f"<p style='font-size:0.8rem;color:#9ca3af;margin-top:0.6rem;'>{explanation}</p>",
@@ -470,7 +481,7 @@ def render_smart_price_tab(profile: Dict, cohort_df: pd.DataFrame):
         )
 
 
-# ---------- Whale Radar & DM Studio stubs (unchanged logic-wise) ----------
+# ---------- Whale Radar & DM Studio stubs ----------
 
 def render_whale_radar_tab(profile: Dict, cohort_df: pd.DataFrame):
     st.markdown(
@@ -579,7 +590,7 @@ def main():
 
     st.markdown("")
 
-    # Tabs – all now wired to profile + synthetic
+    # Tabs – all wired to profile + synthetic
     tabs = st.tabs(["💸 Smart Price Lab", "🐋 Whale Radar", "✉️ DM Studio"])
 
     with tabs[0]:
