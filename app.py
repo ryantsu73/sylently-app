@@ -46,13 +46,9 @@ def fetch_onlyfans_profile(handle: str) -> Dict[str, Any]:
       - avg_views (heuristic from followers)
       - engagement_rate (heuristic from likes and followers)
       - avg_cpm (simple assumption)
-    This relies mainly on the meta description text, which commonly
-    contains patterns like: '... 10.5K likes and 2.3K fans ...'
 
-    NOTE:
-      - This WILL break if OnlyFans changes their HTML structure.
-      - This does NOT bypass logins or protected content. It only uses
-        public metadata (meta tags).
+    This uses public metadata only. If we cannot find any numbers,
+    we gracefully fall back to generic defaults instead of raising.
     """
     username = handle.strip().lstrip("@").strip("/")
     if not username:
@@ -72,6 +68,7 @@ def fetch_onlyfans_profile(handle: str) -> Dict[str, Any]:
     resp = requests.get(url, headers=headers, timeout=20)
 
     if resp.status_code != 200:
+        # Still a hard failure here because the page itself isn't reachable.
         raise RuntimeError(
             f"Failed to load OnlyFans profile page (status {resp.status_code}). "
             f"URL tried: {url}"
@@ -80,17 +77,17 @@ def fetch_onlyfans_profile(handle: str) -> Dict[str, Any]:
     html = resp.text
     soup = BeautifulSoup(html, "html.parser")
 
-    # Try to extract numbers from the meta description.
-    meta_desc_tag = soup.find("meta", attrs={"name": "description"})
     followers = None
     likes = None
 
+    # 1) Try meta description first (old pattern)
+    meta_desc_tag = soup.find("meta", attrs={"name": "description"})
     if meta_desc_tag and meta_desc_tag.get("content"):
         desc = meta_desc_tag["content"]
 
         # Example patterns: '10.5K likes', '2.3K fans'
-        likes_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+likes", desc)
-        fans_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+fans", desc)
+        likes_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+[Ll]ikes", desc)
+        fans_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+[Ff]ans", desc)
 
         if likes_match:
             likes_str = likes_match.group(1)
@@ -100,37 +97,58 @@ def fetch_onlyfans_profile(handle: str) -> Dict[str, Any]:
             fans_str = fans_match.group(1)
             followers = _parse_human_number(fans_str)
 
-    # Fallbacks if we didn't find what we expected
-    if followers is None:
-        # Try to find something else, extremely heuristic:
-        # Look for "[number] fans" anywhere in the HTML text.
+    # 2) If still missing, search in full page text more flexibly
+    if followers is None or likes is None:
         text = soup.get_text(separator=" ", strip=True)
-        fans_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+fans", text)
-        if fans_match:
-            followers = _parse_human_number(fans_match.group(1))
 
+        if followers is None:
+            # look for "1234 fans" / "1234 followers"
+            fans_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+(fans|Followers?)", text)
+            if fans_match:
+                followers = _parse_human_number(fans_match.group(1))
+
+        if likes is None:
+            # look for "1234 likes"
+            likes_match = re.search(r"(\d[\d.,]*\s*[kKmM]?)\s+[Ll]ikes", text)
+            if likes_match:
+                likes = _parse_human_number(likes_match.group(1))
+
+    # 3) If we truly found nothing, DO NOT raise – return a reasonable default
     if followers is None and likes is None:
-        raise RuntimeError(
-            "Could not extract fans/likes from OnlyFans page. "
-            "The page structure may have changed or the profile may be private."
-        )
+        # Fallback generic profile – user can override in the sidebar
+        followers = 5_000
+        likes = None
+        avg_views = int(followers * 0.3)
+        engagement_rate = 3.5
+        avg_cpm = 20.0
 
-    # If we still don't have followers but we do have likes, make a rough guess
+        return {
+            "platform": "OnlyFans",
+            "handle": username,
+            "followers": followers,
+            "avg_views": avg_views,
+            "engagement_rate": engagement_rate,
+            "avg_cpm": avg_cpm,
+            "raw_source": "onlyfans_fallback_no_numbers_found",
+        }
+
+    # 4) Normal derivations when we have at least one signal
+
     if followers is None and likes is not None:
-        # Assume engagement ~ 5–15 likes per 100 followers
+        # Rough guess: ~10% of followers like something at least once
         followers = max(int(likes / 0.1), likes)
 
-    # Derive average views as a heuristic (e.g., 20–40% of followers)
+    if followers is None:
+        # Absolute last resort
+        followers = 5_000
+
     avg_views = int(followers * 0.3)
 
-    # Approximate engagement from likes if available
     if likes is not None and followers > 0:
         engagement_rate = round((likes / followers) * 100, 2)
     else:
-        # Generic OF creator engagement guess
         engagement_rate = 3.5
 
-    # CPM is extremely rough; this is where you can plug your own model
     avg_cpm = 20.0
 
     return {
@@ -138,9 +156,9 @@ def fetch_onlyfans_profile(handle: str) -> Dict[str, Any]:
         "handle": username,
         "followers": followers,
         "avg_views": avg_views,
-        "engagement_rate": engagement_rate,  # %
-        "avg_cpm": avg_cpm,                 # USD
-        "raw_source": "onlyfans_meta_description",
+        "engagement_rate": engagement_rate,
+        "avg_cpm": avg_cpm,
+        "raw_source": "onlyfans_meta_or_text",
     }
 
 
