@@ -1,24 +1,45 @@
+# app.py
+
 import streamlit as st
 
-from synthetic import (
-    generate_synthetic_data_from_profile,
-    compute_percentiles_from_synthetic,
-)
-
-# -----------------------------
-# Page config
-# -----------------------------
+# ---------------------------------------------------
+# PAGE CONFIG
+# ---------------------------------------------------
 st.set_page_config(
-    page_title="Sylently",
+    page_title="Sylently – AI Pricing Lab for Creators",
+    page_icon="✨",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
+# ---------------------------------------------------
+# TRY TO IMPORT YOUR ENGINE MODULES
+# ---------------------------------------------------
+pricing_engine = None
+whales = None
+dm_suggestions = None
+engine_import_error = None
 
-# -----------------------------
-# Session state initialization
-# -----------------------------
-def init_state():
+try:
+    from engine import pricing_engine as _pricing_engine
+    from engine import whales as _whales
+    from engine import dm_suggestions as _dm_suggestions
+
+    pricing_engine = _pricing_engine
+    whales = _whales
+    dm_suggestions = _dm_suggestions
+except Exception as e:
+    engine_import_error = e
+
+
+# ---------------------------------------------------
+# SESSION STATE FOR CREATOR FLOW
+# ---------------------------------------------------
+def init_creator_state():
+    """
+    Keeps track of the currently selected OnlyFans creator and
+    any derived data you may want to attach later (tests, percentiles, etc.).
+    """
     if "creator_profile" not in st.session_state:
         st.session_state["creator_profile"] = None  # dict with creator info
 
@@ -29,20 +50,18 @@ def init_state():
         st.session_state["percentile_data"] = None  # dict with percentile metrics
 
     if "test_results" not in st.session_state:
-        st.session_state["test_results"] = None  # whatever structure you like
+        st.session_state["test_results"] = None  # your test structure
 
-    # NEW: synthetic data generated from OnlyFans profile
     if "synthetic_data" not in st.session_state:
-        st.session_state["synthetic_data"] = None  # dict with synthetic metrics
+        st.session_state["synthetic_data"] = None  # e.g. synthetic from profile
 
 
-init_state()
+init_creator_state()
 
 
-# -----------------------------
-# Core business-logic stubs
-# -----------------------------
-
+# ---------------------------------------------------
+# ONLYFANS LOOKUP LOGIC (STUB – PLUG YOUR REAL CODE)
+# ---------------------------------------------------
 def lookup_onlyfans_profile(profile_url_or_username: str) -> dict:
     """
     LOOKUP STEP (LIVE PAGE / PROFILE SCRAPE)
@@ -61,7 +80,6 @@ def lookup_onlyfans_profile(profile_url_or_username: str) -> dict:
     if "onlyfans.com" in username:
         username = username.rstrip("/").split("/")[-1]
 
-    # Dummy data to show the structure; adapt as needed:
     fake_profile = {
         "username": username,
         "display_name": username.capitalize(),
@@ -73,7 +91,7 @@ def lookup_onlyfans_profile(profile_url_or_username: str) -> dict:
         "avg_comments": 4,
         "bio": "This is an example bio. Replace with real scraped data.",
         "niche": "General",
-        # Optional: if you scrape subscription price, wire it here:
+        # If you have subscription price or other stats, add them here:
         "price": 9.99,
         "source": "live_page",  # mark that this came from a live lookup
     }
@@ -81,113 +99,455 @@ def lookup_onlyfans_profile(profile_url_or_username: str) -> dict:
     # --- END: example stub ---
 
 
-def run_small_test_for_creator(profile: dict) -> dict:
+# ---------------------------------------------------
+# HELPERS: FIND A UI FUNCTION IN A MODULE
+# ---------------------------------------------------
+def _call_first_existing(module, candidates, tool_label: str):
     """
-    SMALL TEST LOGIC
-
-    This function should run your 'small test' to generate performance data,
-    then return a structure with the key outputs your UI needs.
-
-    Plug your existing test logic in here.
+    Try calling the first function name in `candidates` that exists in `module`.
+    If none exist, show a helpful message.
     """
-
-    # --- BEGIN: example stub (safe to replace with your real code) ---
-    username = profile.get("username", "unknown_creator")
-    results = {
-        "creator": username,
-        "test_sample_size": 100,
-        "test_notes": "Example test results. Replace with real test logic.",
-        "raw_metrics": {
-            "click_through_rate": 0.12,
-            "conversion_rate": 0.03,
-        },
-    }
-    return results
-    # --- END: example stub ---
-
-
-def compute_percentiles_from_test_results(test_results: dict) -> dict:
-    """
-    Given the 'small test' results, compute percentile metrics.
-    Replace the body with your real scoring / percentile model.
-    """
-
-    # --- BEGIN: example stub (safe to replace with your real code) ---
-    percentiles = {
-        "views_percentile": 0.75,        # 75th percentile
-        "earnings_percentile": 0.62,     # 62nd percentile
-        "engagement_percentile": 0.80,   # 80th percentile
-        "source": "small_test",
-        "explanation": "Dummy percentile values derived from small test results.",
-    }
-    return percentiles
-    # --- END: example stub ---
-
-
-def compute_percentiles_from_live_profile(profile: dict) -> dict:
-    """
-    FALLBACK: compute percentile metrics by first creating realistic synthetic
-    performance data from the live OnlyFans profile stats, then mapping those
-    synthetic metrics to percentile scores.
-
-    This is now the *dynamic synthetic* path you asked for.
-    """
-
-    # Generate synthetic data from the profile (7-day sample by default)
-    synth = generate_synthetic_data_from_profile(profile)
-    st.session_state["synthetic_data"] = synth
-
-    # Map synthetic summary to percentile scores
-    percentiles = compute_percentiles_from_synthetic(synth)
-
-    return percentiles
-
-
-# -----------------------------
-# UI helper functions
-# -----------------------------
-
-def ensure_profile_loaded():
-    """
-    Guard function to be used at the top of any tab or section that
-    depends on the creator profile.
-    """
-    if not st.session_state.get("profile_loaded") or not st.session_state.get("creator_profile"):
-        st.warning("Please complete **Step 1 · Look up OnlyFans profile** above first.")
-        st.stop()
-
-
-def show_sidebar_profile_summary():
-    """
-    Shows the currently loaded creator profile in the sidebar.
-    """
-    prof = st.session_state.get("creator_profile")
-    st.sidebar.markdown("### Current Creator")
-
-    if not prof:
-        st.sidebar.info("No creator selected yet. Use Step 1 to look up a profile.")
+    if module is None:
+        st.error(
+            f"Could not import engine module for **{tool_label}**.\n\n"
+            f"Python error: `{engine_import_error}`"
+        )
+        with st.expander("How to fix this"):
+            st.markdown(
+                """
+                1. Make sure you have a folder called `engine` in the same directory as `app.py`.
+                2. Inside `engine`, you should have:
+                   - `__init__.py`
+                   - `pricing_engine.py`
+                   - `whales.py`
+                   - `dm_suggestions.py`
+                3. Commit + push to GitHub, then reload the app.
+                """
+            )
         return
 
-    display_name = prof.get("display_name", prof.get("username", "Unknown"))
-    username = prof.get("username", "n/a")
-    st.sidebar.write(f"**{display_name}**")
-    st.sidebar.write(f"@{username}")
+    for name in candidates:
+        if hasattr(module, name):
+            fn = getattr(module, name)
+            if callable(fn):
+                fn()
+                return
 
-    if prof.get("profile_url"):
-        st.sidebar.write(prof["profile_url"])
+    # If we got here, the module imported but no expected function names exist
+    st.warning(
+        f"I could import `{module.__name__}`, but I couldn't find any of these "
+        f"functions: {', '.join(candidates)}."
+    )
+    with st.expander("How to fix this"):
+        st.markdown(
+            f"""
+            - Open `{module.__file__}` and either:
+              - Add one function with one of these names: `{', '.join(candidates)}`, and put your Streamlit UI in there, **or**
+              - Rename your existing main UI function to one of those names.
+            - Example inside `{module.__name__}.py`:
 
-    st.sidebar.write(f"Followers: {prof.get('followers', 'n/a')}")
-    st.sidebar.write(f"Posts: {prof.get('posts_count', 'n/a')}")
-    niche = prof.get("niche")
-    if niche:
-        st.sidebar.write(f"Niche: {niche}")
+              ```python
+              import streamlit as st
+
+              def render_ui():
+                  st.subheader("{tool_label} UI")
+                  # ... your existing inputs/outputs ...
+              ```
+            """
+        )
 
 
-def show_profile_lookup_step():
+# ---------------------------------------------------
+# WRAPPERS FOR EACH TOOL
+# ---------------------------------------------------
+def render_smart_price_test_ui():
     """
-    STEP 1: OnlyFans profile lookup (this always comes first in the flow).
+    Call the main UI function in engine/pricing_engine.py.
+    Tries several common names so you don't have to change your file if you already built it.
     """
-    st.subheader("Step 1 · Look up OnlyFans profile (required)")
+    _call_first_existing(
+        pricing_engine,
+        candidates=[
+            "render_smart_price_test_ui",
+            "render_smart_price_test",
+            "render_ui",
+            "main",
+            "app",
+        ],
+        tool_label="Smart Price Test",
+    )
+
+
+def render_whale_radar_ui():
+    """
+    Call the main UI function in engine/whales.py.
+    """
+    _call_first_existing(
+        whales,
+        candidates=[
+            "render_whale_radar_ui",
+            "render_whales_ui",
+            "render_whale_detector",
+            "render_ui",
+            "main",
+            "app",
+        ],
+        tool_label="Whale Radar",
+    )
+
+
+def render_dm_studio_ui():
+    """
+    Call the main UI function in engine/dm_suggestions.py.
+    """
+    _call_first_existing(
+        dm_suggestions,
+        candidates=[
+            "render_dm_studio_ui",
+            "render_dm_suggestions_ui",
+            "render_dm_ui",
+            "render_ui",
+            "main",
+            "app",
+        ],
+        tool_label="DM Studio",
+    )
+
+
+# ---------------------------------------------------
+# GLOBAL CSS INJECTION
+# ---------------------------------------------------
+def inject_global_css():
+    st.markdown(
+        """
+        <style>
+        /* Import modern Google Font */
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+        html, body, [class*="css"]  {
+            font-family: 'Space Grotesk', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background-color: #050712;
+        }
+
+        /* Hide Streamlit elements for a more “site-like” feel */
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+
+        /* Full-page gradient background */
+        .main {
+            background: radial-gradient(circle at top left, #1d2033 0, #050712 45%, #02010a 100%);
+            color: #F9FAFB;
+        }
+
+        /* Hero section */
+        .hero-container {
+            padding: 3.5rem 3rem 2rem 3rem;
+            border-radius: 32px;
+            position: relative;
+            overflow: hidden;
+            background: radial-gradient(circle at top left, rgba(139, 92, 246, 0.26), transparent 55%),
+                        radial-gradient(circle at bottom right, rgba(236, 72, 153, 0.18), transparent 55%),
+                        linear-gradient(135deg, #050818 0%, #050712 60%, #04030f 100%);
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            box-shadow:
+                0 40px 120px rgba(15, 23, 42, 0.9),
+                0 0 0 1px rgba(15, 23, 42, 0.8);
+        }
+
+        .hero-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            border-radius: 999px;
+            padding: 6px 14px;
+            background: rgba(15, 23, 42, 0.9);
+            border: 1px solid rgba(148, 163, 184, 0.5);
+            color: #E5E7EB;
+            font-size: 0.8rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .hero-title {
+            font-size: 3.0rem;
+            line-height: 1.05;
+            letter-spacing: -0.06em;
+            font-weight: 700;
+        }
+
+        .hero-gradient {
+            background: linear-gradient(120deg, #e5e7eb 0%, #c4b5fd 40%, #f97316 80%, #f9a8d4 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero-subtitle {
+            margin-top: 1.25rem;
+            font-size: 1.05rem;
+            color: #9CA3AF;
+            max-width: 32rem;
+        }
+
+        .hero-metrics {
+            display: flex;
+            gap: 2.5rem;
+            margin-top: 2.0rem;
+            font-size: 0.9rem;
+        }
+
+        .hero-metric-label {
+            color: #9CA3AF;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            font-size: 0.75rem;
+        }
+        .hero-metric-value {
+            font-size: 1.4rem;
+            font-weight: 600;
+            color: #E5E7EB;
+        }
+
+        .hero-cta-row {
+            display: flex;
+            gap: 1.0rem;
+            align-items: center;
+            margin-top: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .primary-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1.8rem;
+            border-radius: 999px;
+            border: none;
+            cursor: pointer;
+            color: #0B1120;
+            font-weight: 600;
+            font-size: 0.95rem;
+            background: linear-gradient(135deg, #f97316, #ec4899);
+            box-shadow:
+                0 15px 40px rgba(236, 72, 153, 0.55),
+                0 0 0 1px rgba(148, 163, 184, 0.55);
+            transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
+        }
+
+        .primary-btn:hover {
+            transform: translateY(-1px) scale(1.01);
+            filter: brightness(1.03);
+            box-shadow:
+                0 20px 60px rgba(236, 72, 153, 0.75),
+                0 0 0 1px rgba(249, 115, 22, 0.75);
+        }
+
+        .ghost-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.35rem;
+            padding: 0.7rem 1.4rem;
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.5);
+            background: rgba(15, 23, 42, 0.7);
+            color: #E5E7EB;
+            font-weight: 500;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+        }
+
+        .ghost-btn:hover {
+            background: rgba(15, 23, 42, 0.9);
+            border-color: rgba(248, 250, 252, 0.85);
+            transform: translateY(-1px);
+        }
+
+        /* Glass cards for the tools */
+        .tool-card {
+            padding: 1.6rem 1.4rem;
+            border-radius: 20px;
+            background: linear-gradient(135deg, rgba(15,23,42,0.9), rgba(15,23,42,0.72));
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            box-shadow:
+                0 18px 55px rgba(15, 23, 42, 0.9),
+                0 0 0 1px rgba(15, 23, 42, 0.9);
+            color: #E5E7EB;
+        }
+
+        .tool-card h3 {
+            font-size: 1.1rem;
+            margin-bottom: 0.45rem;
+        }
+
+        .tool-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            border-radius: 999px;
+            padding: 0.18rem 0.7rem;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: #A5B4FC;
+            background: rgba(49, 46, 129, 0.7);
+        }
+
+        .section-title {
+            font-size: 1.4rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        .section-subtitle {
+            color: #9CA3AF;
+            font-size: 0.95rem;
+            margin-bottom: 1.8rem;
+        }
+
+        /* Make Streamlit primary buttons more pill-like by default */
+        button[kind="primary"] {
+            border-radius: 999px !important;
+        }
+
+        /* Inputs */
+        .stTextInput > div > div > input,
+        .stNumberInput input,
+        .stSelectbox > div > div > select {
+            background-color: rgba(15, 23, 42, 0.9);
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.6);
+            color: #E5E7EB;
+        }
+
+        .stSlider > div > div > div > div {
+            color: #E5E7EB;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------------------------------
+# HERO SECTION
+# ---------------------------------------------------
+def render_hero():
+    st.markdown(
+        """
+        <div class="hero-container">
+          <div style="display:flex; gap:3rem; align-items:flex-start; justify-content:space-between; flex-wrap:wrap;">
+            <div style="max-width:520px;">
+              <div class="hero-pill">
+                <span style="width:7px; height:7px; border-radius:999px; background:radial-gradient(circle,#22C55E 0,#16A34A 35%,transparent 100%); box-shadow:0 0 10px rgba(34,197,94,0.9);"></span>
+                Real‑time AI pricing lab for subscription creators
+              </div>
+              <h1 class="hero-title">
+                Turn fans into<br><span class="hero-gradient">predictable recurring revenue.</span>
+              </h1>
+              <p class="hero-subtitle">
+                Sylently runs price experiments, spots whales before they churn, and
+                writes the DMs that keep them in love with you — all in one control center.
+              </p>
+
+              <div class="hero-metrics">
+                <div>
+                  <div class="hero-metric-label">Avg. MRR lift</div>
+                  <div class="hero-metric-value">+18.7%</div>
+                </div>
+                <div>
+                  <div class="hero-metric-label">Payback on tests</div>
+                  <div class="hero-metric-value">&lt; 7 days</div>
+                </div>
+                <div>
+                  <div class="hero-metric-label">Fans analyzed</div>
+                  <div class="hero-metric-value">127,392+</div>
+                </div>
+              </div>
+
+              <div class="hero-cta-row">
+                <button class="primary-btn" onclick="window.scrollTo({ top: document.body.scrollHeight * 0.35, behavior: 'smooth' });">
+                  Start a price test
+                </button>
+                <button class="ghost-btn" onclick="window.scrollTo({ top: document.body.scrollHeight * 0.6, behavior: 'smooth' });">
+                  Explore whale radar
+                </button>
+              </div>
+            </div>
+
+            <div style="flex:1; min-width:260px; max-width:480px; position:relative;">
+              <!-- Placeholder 'dashboard' card -->
+              <div style="
+                position:relative;
+                padding:1.7rem 1.6rem;
+                border-radius:24px;
+                background:radial-gradient(circle at top,#1E293B,transparent 65%),
+                           linear-gradient(135deg,#020617,#020617 55%,#020617);
+                border:1px solid rgba(148,163,184,0.42);
+                box-shadow:0 18px 60px rgba(15,23,42,0.9);
+                overflow:hidden;
+              ">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.4rem;">
+                  <div style="font-size:0.78rem; text-transform:uppercase; letter-spacing:0.18em; color:#9CA3AF;">
+                    Sylently · Live lab
+                  </div>
+                  <div style="display:flex; gap:4px;">
+                    <span style="width:8px; height:8px; border-radius:999px; background:#22C55E;"></span>
+                    <span style="width:8px; height:8px; border-radius:999px; background:#F97316;"></span>
+                    <span style="width:8px; height:8px; border-radius:999px; background:#EF4444;"></span>
+                  </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns:2fr 1.5fr; gap:1rem; align-items:flex-start;">
+                  <div>
+                    <div style="font-size:0.78rem; text-transform:uppercase; letter-spacing:0.16em; color:#9CA3AF; margin-bottom:0.4rem;">
+                      Smart price test
+                    </div>
+                    <div style="font-size:2.1rem; font-weight:600; color:#E5E7EB;">$47 &rarr; $61</div>
+                    <div style="font-size:0.85rem; color:#9CA3AF; margin-top:0.4rem;">
+                      Bayesian optimizer projects <span style="color:#facc15;">+21.3% MRR</span> at new anchor price.
+                    </div>
+                  </div>
+                  <div>
+                    <div style="font-size:0.78rem; text-transform:uppercase; letter-spacing:0.16em; color:#9CA3AF; margin-bottom:0.4rem;">
+                      Whale radar
+                    </div>
+                    <div style="font-size:1.1rem; color:#E5E7EB; margin-bottom:0.35rem;">
+                      7 whales<br><span style="color:#f97316;">2 at churn‑risk</span>
+                    </div>
+                    <div style="font-size:0.8rem; color:#9CA3AF;">
+                      AI flags your top fans and suggests save‑my‑whale DMs.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------------------------------
+# STEP 1: ONLYFANS CREATOR LOOKUP + SNAPSHOT
+# ---------------------------------------------------
+def render_creator_lookup_section():
+    """
+    New Step 1: OnlyFans creator lookup, placed after hero and before the tools.
+    This feeds st.session_state["creator_profile"] for all downstream tools.
+    """
+    st.markdown("### Step 1 · Look up your OnlyFans creator profile")
+    st.markdown(
+        "<p style='color:#9CA3AF; font-size:0.9rem; margin-bottom:0.6rem;'>"
+        "Start by selecting the creator you want to run tests and DMs for. "
+        "We’ll use this profile as context across the lab."
+        "</p>",
+        unsafe_allow_html=True,
+    )
 
     col1, col2 = st.columns([3, 1])
 
@@ -221,8 +581,6 @@ def show_profile_lookup_step():
             else:
                 st.session_state["creator_profile"] = profile
                 st.session_state["profile_loaded"] = True
-
-                # Reset downstream data when a new profile is loaded
                 st.session_state["percentile_data"] = None
                 st.session_state["test_results"] = None
                 st.session_state["synthetic_data"] = None
@@ -230,246 +588,181 @@ def show_profile_lookup_step():
                 username = profile.get("username", profile_input.strip())
                 st.success(f"Profile loaded for @{username}")
 
-    # If a profile is already loaded, show a small summary below the input
+    # Snapshot card if profile loaded
     if st.session_state["profile_loaded"] and st.session_state["creator_profile"]:
         prof = st.session_state["creator_profile"]
+
+        st.markdown(
+            """
+            <div style="
+                margin-top: 0.8rem;
+                margin-bottom: 1.2rem;
+                padding: 1.1rem 1.2rem;
+                border-radius: 18px;
+                background: linear-gradient(135deg, rgba(15,23,42,0.9), rgba(15,23,42,0.75));
+                border: 1px solid rgba(148,163,184,0.35);
+            ">
+            """,
+            unsafe_allow_html=True,
+        )
+
+        col_a, col_b = st.columns([2, 3])
+
+        with col_a:
+            st.markdown("**Current creator**")
+            st.write(
+                f"**{prof.get('display_name', prof.get('username', 'Unknown'))}**"
+                f"  (@{prof.get('username', 'n/a')})"
+            )
+            st.write(prof.get("profile_url", "—"))
+
+            niche = prof.get("niche") or "n/a"
+            st.write(f"Niche: {niche}")
+
+        with col_b:
+            col_b1, col_b2, col_b3 = st.columns(3)
+            with col_b1:
+                st.metric("Followers", prof.get("followers", "n/a"))
+            with col_b2:
+                st.metric("Posts", prof.get("posts_count", "n/a"))
+            with col_b3:
+                st.metric("Avg likes", prof.get("avg_likes", "n/a"))
+
+        st.markdown("</div>", unsafe_allow_html=True)
+    else:
         st.info(
-            f"Using profile: **{prof.get('display_name', prof.get('username', 'Unknown'))}** "
-            f"(@{prof.get('username', 'n/a')})\n\n"
-            f"URL: {prof.get('profile_url', 'n/a')}"
+            "No creator selected yet. Look up an OnlyFans profile above to unlock the lab tools."
         )
 
 
-# -----------------------------
-# Tab content functions
-# -----------------------------
+# ---------------------------------------------------
+# FEATURE CARDS OVERVIEW
+# ---------------------------------------------------
+def render_tools_overview():
+    st.markdown(
+        """
+        <div>
+          <h2 class="section-title">Your AI revenue lab</h2>
+          <p class="section-subtitle">
+            Three focused tools that work together: run price tests, spot whales, and drop irresistible DMs — 
+            without spreadsheets or guesswork.
+          </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-def show_overview_tab():
-    ensure_profile_loaded()
-    prof = st.session_state["creator_profile"]
-
-    st.subheader("Overview")
-
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.markdown("#### Basic Info")
-        st.write(f"**Display name:** {prof.get('display_name', 'n/a')}")
-        st.write(f"**Username:** @{prof.get('username', 'n/a')}")
-        st.write(f"**Profile URL:** {prof.get('profile_url', 'n/a')}")
-
-        niche = prof.get("niche") or "n/a"
-        st.write(f"**Niche:** {niche}")
-
-        bio = prof.get("bio") or "_No bio available_"
-        st.markdown("**Bio:**")
-        st.write(bio)
+        st.markdown(
+            """
+            <div class="tool-card">
+              <div class="tool-badge">Core · Experiment</div>
+              <h3>Smart Price Test</h3>
+              <p style="color:#9CA3AF; font-size:0.9rem; margin-bottom:0.9rem;">
+                Set your current price, variants, and goal. Sylently runs the math and recommends
+                the price that grows MRR while keeping fans happy.
+              </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     with col2:
-        st.markdown("#### Stats (from live profile)")
-        st.write(f"**Followers:** {prof.get('followers', 'n/a')}")
-        st.write(f"**Posts:** {prof.get('posts_count', 'n/a')}")
-        st.write(f"**Avg likes (example field):** {prof.get('avg_likes', 'n/a')}")
-        st.write(f"**Avg comments (example field):** {prof.get('avg_comments', 'n/a')}")
+        st.markdown(
+            """
+            <div class="tool-card">
+              <div class="tool-badge" style="background:rgba(22,78,99,0.8); color:#67E8F9;">
+                Signal · Whales
+              </div>
+              <h3>Whale Radar</h3>
+              <p style="color:#9CA3AF; font-size:0.9rem; margin-bottom:0.9rem;">
+                Upload your fan list and tipping history. We highlight whales, upsell potential,
+                and early churn‑risk before they ghost.
+              </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    st.markdown("---")
-    st.markdown(
-        "_This overview is powered by the live OnlyFans profile data. "
-        "Run a small test in the next tab for deeper percentile-based insights, "
-        "or use synthetic estimates from the Percentiles tab._"
-    )
-
-
-def show_tests_tab():
-    ensure_profile_loaded()
-    prof = st.session_state["creator_profile"]
-
-    st.subheader("Tests / Performance")
-
-    st.markdown(
-        "Use a small test to generate more accurate performance metrics for this creator. "
-        "If you skip the test, you can still use synthetic metrics generated from the live profile data."
-    )
-
-    run_test_clicked = st.button("Run small test for this creator")
-
-    if run_test_clicked:
-        with st.spinner("Running small test..."):
-            results = run_small_test_for_creator(prof)
-        st.session_state["test_results"] = results
-
-        # After test, compute percentiles from test results
-        percentiles = compute_percentiles_from_test_results(results)
-        st.session_state["percentile_data"] = percentiles
-
-        st.success("Small test completed and percentile data updated.")
-
-    # Show test results if they exist
-    if st.session_state["test_results"]:
-        st.markdown("### Test Results")
-        st.json(st.session_state["test_results"])
-    else:
-        st.info("No small test has been run yet for this creator.")
-
-        # If we have synthetic data, show a baseline here
-        synth = st.session_state.get("synthetic_data")
-        if synth:
-            st.markdown("### Synthetic Baseline (from live profile)")
-            summary = synth.get("summary", {})
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Avg daily impressions", summary.get("avg_impressions", 0))
-            with col2:
-                st.metric("Avg daily clicks", summary.get("avg_clicks", 0))
-            with col3:
-                st.metric("Avg daily subs", summary.get("avg_subs", 0))
-
-            st.caption(
-                "These are synthetic, realistic estimates generated from the creator's "
-                "OnlyFans profile stats. Run a small test above to replace them with real data."
-            )
-
-
-def show_percentiles_tab():
-    ensure_profile_loaded()
-    prof = st.session_state["creator_profile"]
-    st.subheader("Percentiles & Insights")
-
-    percentile_data = st.session_state.get("percentile_data")
-
-    if not percentile_data:
-        # Original message
-        st.warning("Run a small test first; we don't have percentile data.")
-
-        # Button: use live profile data instead (now uses synthetic engine)
-        use_live = st.button("Use live OnlyFans profile data instead")
-
-        if use_live:
-            with st.spinner("Computing synthetic metrics from live profile data..."):
-                approx = compute_percentiles_from_live_profile(prof)
-            st.session_state["percentile_data"] = approx
-            percentile_data = approx
-            st.success("Synthetic metrics and percentile estimates added from live profile data.")
-
-    if percentile_data:
-        source = percentile_data.get("source", "unknown")
-        explanation = percentile_data.get("explanation")
-
-        st.markdown(f"**Data source:** `{source}`")
-        if explanation:
-            st.markdown(f"**Note:** {explanation}")
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.metric(
-                label="Views Percentile",
-                value=f"{int((percentile_data.get('views_percentile', 0) or 0) * 100)}th",
-            )
-        with col2:
-            st.metric(
-                label="Earnings Percentile",
-                value=f"{int((percentile_data.get('earnings_percentile', 0) or 0) * 100)}th",
-            )
-        with col3:
-            st.metric(
-                label="Engagement Percentile",
-                value=f"{int((percentile_data.get('engagement_percentile', 0) or 0) * 100)}th",
-            )
-
-        st.markdown("#### Raw percentile data (debug / detail)")
-        st.json(percentile_data)
-    else:
-        st.info(
-            "Once you run a small test or use live profile data, "
-            "this tab will show percentile-based insights."
+    with col3:
+        st.markdown(
+            """
+            <div class="tool-card">
+              <div class="tool-badge" style="background:rgba(76,29,149,0.85); color:#F5D0FE;">
+                Studio · DMs
+              </div>
+              <h3>DM Studio</h3>
+              <p style="color:#9CA3AF; font-size:0.9rem; margin-bottom:0.9rem;">
+                Paste a chat thread or fan notes, pick your vibe, and Sylently drafts playful,
+                on‑brand DMs that nudge upgrades instead of begging.
+              </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
 
-def show_pricing_tab():
-    ensure_profile_loaded()
-    prof = st.session_state["creator_profile"]
-    percentile_data = st.session_state.get("percentile_data")
+# ---------------------------------------------------
+# TABS THAT RUN YOUR TOOLS (GATED BY CREATOR)
+# ---------------------------------------------------
+def render_lab_tabs():
+    st.markdown("### Open your lab")
+    st.markdown(
+        "<p style='color:#9CA3AF; font-size:0.9rem; margin-bottom:1.2rem;'>"
+        "Choose a tool below to get to work. All tools use the current OnlyFans profile "
+        "you selected in Step&nbsp;1."
+        "</p>",
+        unsafe_allow_html=True,
+    )
 
-    st.subheader("Pricing & Offer Strategy")
-
-    if not percentile_data:
+    # Enforce "Step 1 first" flow
+    if not st.session_state.get("profile_loaded") or not st.session_state.get(
+        "creator_profile"
+    ):
         st.warning(
-            "You don't have percentile data yet. "
-            "Pricing suggestions will be very rough. "
-            "Consider running a small test first (Tests tab) or using live profile data."
+            "To keep things consistent, please complete **Step 1 – Look up your OnlyFans creator "
+            "profile** above before opening the lab tools."
         )
+        return
 
-    st.markdown("### Suggested positioning")
-
-    followers = prof.get("followers") or 0
-    base_tier = "mid-tier"
-    if followers < 1000:
-        base_tier = "small"
-    elif followers > 10000:
-        base_tier = "top-tier"
-
-    st.write(
-        f"This creator currently looks like a **{base_tier}** creator "
-        f"based on live follower count ({followers})."
+    tab1, tab2, tab3 = st.tabs(
+        ["🧪 Smart Price Test", "🐋 Whale Radar", "💬 DM Studio"]
     )
 
-    if percentile_data:
-        earnings_pct = percentile_data.get("earnings_percentile", 0.5)
-        if earnings_pct >= 0.8:
-            st.write(
-                "Their earnings indicators are in the **top 20%** of creators. "
-                "You can likely justify higher pricing and more premium offers."
-            )
-        elif earnings_pct <= 0.3:
-            st.write(
-                "Their earnings indicators are in the **lower 30%**. "
-                "You may want to start with conservative pricing and performance-based deals."
-            )
-        else:
-            st.write(
-                "Their earnings indicators are around the **middle of the pack**. "
-                "Balanced, market-rate deals are likely appropriate."
-            )
+    with tab1:
+        render_smart_price_test_ui()
 
-    st.markdown("---")
-    st.markdown(
-        "_Customize this tab with your actual pricing logic once your percentile "
-        "data and test results are wired in._"
-    )
+    with tab2:
+        render_whale_radar_ui()
+
+    with tab3:
+        render_dm_studio_ui()
 
 
-# -----------------------------
-# Main app
-# -----------------------------
-
+# ---------------------------------------------------
+# MAIN ENTRY POINT
+# ---------------------------------------------------
 def main():
-    st.title("Sylently")
+    inject_global_css()
+    render_hero()
 
-    # Sidebar summary of current profile
-    show_sidebar_profile_summary()
+    # Spacer
+    st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
 
-    # STEP 1: OnlyFans profile lookup (always first)
-    show_profile_lookup_step()
+    # NEW: Step 1 – OnlyFans creator lookup + snapshot
+    render_creator_lookup_section()
 
-    st.markdown("---")
+    # Spacer
+    st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
 
-    # Tabs that all depend on the selected creator
-    tab_overview, tab_tests, tab_percentiles, tab_pricing = st.tabs(
-        ["Overview", "Tests", "Percentiles", "Pricing"]
-    )
+    render_tools_overview()
 
-    with tab_overview:
-        show_overview_tab()
+    # Spacer
+    st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
 
-    with tab_tests:
-        show_tests_tab()
-
-    with tab_percentiles:
-        show_percentiles_tab()
-
-    with tab_pricing:
-        show_pricing_tab()
+    render_lab_tabs()
 
 
 if __name__ == "__main__":
