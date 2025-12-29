@@ -8,6 +8,7 @@ import streamlit as st
 from engine.pricing_engine import render_ui as render_smart_price_test_ui
 from engine.whales import render_ui as render_whale_radar_ui
 from engine.dm_suggestions import render_ui as render_dm_studio_ui
+from engine.of_lookup import render_ui as render_of_lookup_ui  # NEW
 
 
 # ---------------------------------------------------
@@ -234,7 +235,7 @@ button[kind="primary"] {
 
 
 # ---------------------------------------------------
-# HERO SECTION  (ALL HTML LINES LEFT‑ALIGNED SO IT RENDERS, NOT AS CODE)
+# HERO SECTION
 # ---------------------------------------------------
 def render_hero():
     st.markdown(
@@ -404,8 +405,8 @@ def render_lab_tabs():
         unsafe_allow_html=True,
     )
 
-    tab1, tab2, tab3 = st.tabs(
-        ["🧪 Smart Price Test", "🐋 Whale Radar", "💬 DM Studio"]
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["🧪 Smart Price Test", "🐋 Whale Radar", "💬 DM Studio", "🔗 OnlyFans Profile"]
     )
 
     with tab1:
@@ -416,6 +417,9 @@ def render_lab_tabs():
 
     with tab3:
         render_dm_studio_ui()
+
+    with tab4:
+        render_of_lookup_ui()
 
 
 # ---------------------------------------------------
